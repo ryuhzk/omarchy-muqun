@@ -1,0 +1,15 @@
+{
+  "name": "omarchy-muqun",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "sidecar": "bun run backend/sidecar.ts",
+    "test": "bun test",
+    "check": "bun test && bun build backend/sidecar.ts --target=bun --outdir=/tmp/omarchy-muqun-build"
+  },
+  "dependencies": {
+    "@effect/platform-bun": "4.0.0-rc.114",
+    "effect": "4.0.0-rc.113"
+  }
+}
