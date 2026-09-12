@@ -37,6 +37,16 @@ Flickable {
   /** Which row has its menu open, if any. One at a time. */
   property string menuPane: ""
 
+  /**
+   * Panes that have just started waiting on a human.
+   *
+   * Their mark pulses once when the row is built, which is how a list that is
+   * redrawn from a fresh snapshot can still say "this one changed". Set by the
+   * panel from what it knew before and what it has now; a row that was
+   * already waiting does not pulse again.
+   */
+  property var pulsePanes: []
+
   contentWidth: width
   contentHeight: column.height
   clip: true
@@ -181,6 +191,8 @@ Flickable {
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall
 
+            Behavior on color { ColorAnimation { duration: 120 } }
+
             HoverHandler { id: newHover; cursorShape: Qt.PointingHandCursor }
             TapHandler {
               onTapped: root.terminalRequested(hostBlock.host ? hostBlock.host.alias : "")
@@ -213,6 +225,8 @@ Flickable {
                  : hover.hovered || menuOpen ? Style.hoverFill
                  : "transparent"
             z: menuOpen ? 5 : 0
+
+            Behavior on color { ColorAnimation { duration: 120 } }
 
             HoverHandler { id: hover }
 
@@ -251,6 +265,7 @@ Flickable {
                 // The status column. One character wide, present even when
                 // empty, so every title starts at the same x.
                 Text {
+                  id: markText
                   textFormat: Text.PlainText
                   width: markMetrics.width
                   text: root.markFor ? root.markFor(modelData.status) : ""
@@ -258,6 +273,26 @@ Flickable {
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.bodySmall
                   horizontalAlignment: Text.AlignHCenter
+                  transformOrigin: Item.Center
+
+                  // One beat, when an agent starts waiting. Small and once:
+                  // the mark is already the colour that says "waiting", and a
+                  // pulse that kept going would be a second thing to ignore.
+                  SequentialAnimation {
+                    id: markPulse
+                    NumberAnimation {
+                      target: markText; property: "scale"; to: 1.45
+                      duration: 120; easing.type: Easing.OutCubic
+                    }
+                    NumberAnimation {
+                      target: markText; property: "scale"; to: 1
+                      duration: 260; easing.type: Easing.OutBack
+                    }
+                  }
+
+                  Component.onCompleted: {
+                    if (root.pulsePanes.indexOf(modelData.id) >= 0) markPulse.start()
+                  }
 
                   TextMetrics {
                     id: markMetrics
@@ -300,7 +335,10 @@ Flickable {
             // One item, so it is a word on a ground rather than a menu with a
             // list of one thing in it.
             Rectangle {
-              visible: row.menuOpen
+              opacity: row.menuOpen ? 1 : 0
+              visible: opacity > 0
+              scale: row.menuOpen ? 1 : 0.92
+              transformOrigin: Item.Right
               anchors.right: parent.right
               anchors.rightMargin: Style.space(6)
               anchors.verticalCenter: parent.verticalCenter
@@ -308,6 +346,9 @@ Flickable {
               height: closeLabel.implicitHeight + Style.space(8)
               radius: Style.cornerRadius
               color: Color.popups.background
+
+              Behavior on opacity { NumberAnimation { duration: 120 } }
+              Behavior on scale { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
               border.width: 1
               border.color: Qt.rgba(Color.urgent.r, Color.urgent.g, Color.urgent.b, 0.45)
 

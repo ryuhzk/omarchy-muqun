@@ -11,6 +11,7 @@
  */
 
 import { Context, Effect, Schema, Stream, type Scope } from 'effect';
+import type { AgentStatus } from '../domain/agent-status';
 import type { Capability } from '../domain/host';
 import type { Pane } from '../domain/pane';
 import type { Row } from '../domain/screen';
@@ -225,7 +226,14 @@ export interface TerminalSourceApi {
       keys: ReadonlyArray<string>
     ): Effect.Effect<void, SourceError | TransportError>;
     /**
-     * Block until one of these agents wants a human, and say which.
+     * Block until one of these agents leaves the state it is in, and say which.
+     *
+     * Each agent comes with the state it was last seen in, and the watch is
+     * for a change from that. The tool on the far side answers "is the agent
+     * in one of these states" and answers at once when it already is, so a
+     * watch for "blocked" on an agent that is already blocked is not a watch
+     * but a question asked over and over. Naming the state it is in now is
+     * what makes the answer an event.
      *
      * All of them over one connection, not one each. Every held-open channel
      * costs one of the ten sshd allows per connection, so watching per pane
@@ -236,7 +244,7 @@ export interface TerminalSourceApi {
      */
     waitForAgents(
       alias: string,
-      paneIds: ReadonlyArray<string>
+      agents: ReadonlyArray<AgentWatch>
     ): Effect.Effect<string, TransportError, Scope.Scope>;
     /**
      * Attach to one pane over a terminal, the way logging in does.
@@ -292,6 +300,12 @@ export class TerminalSources extends Context.Service<
   TerminalSources,
   { readonly all: ReadonlyArray<TerminalSourceApi> }
 >()('muqun/TerminalSources') {}
+
+/** One agent to watch, and the state a change is measured from. */
+export interface AgentWatch {
+  readonly id: string;
+  readonly status: AgentStatus;
+}
 
 export interface AttachOptions {
   /**

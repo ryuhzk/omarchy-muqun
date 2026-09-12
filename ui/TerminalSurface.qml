@@ -80,6 +80,11 @@ FocusScope {
     id: view
     anchors.fill: parent
     anchors.margins: Style.space(10)
+    // A screen arrives rather than snaps in: the rows are cleared when a pane
+    // is picked and filled by the first frame from the far side, and the fade
+    // is what makes that read as one pane giving way to another.
+    opacity: root.rows.length > 0 ? 1 : 0
+    Behavior on opacity { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
     rows: root.rows
     cursor: root.cursor
     palette: root.palette
@@ -97,7 +102,9 @@ FocusScope {
     anchors.right: parent.right
     anchors.bottom: parent.bottom
     anchors.margins: Style.space(10)
-    visible: view.hasSelection
+    opacity: view.hasSelection ? 1 : 0
+    visible: opacity > 0
+    Behavior on opacity { NumberAnimation { duration: 120 } }
     text: "ctrl shift c to copy"
     color: Qt.rgba(Color.popups.text.r, Color.popups.text.g, Color.popups.text.b, 0.45)
     font.family: root.fontFamily
@@ -109,7 +116,9 @@ FocusScope {
     textFormat: Text.PlainText
     anchors.centerIn: parent
     width: parent.width - Style.space(48)
-    visible: root.rows.length === 0
+    opacity: root.rows.length === 0 ? 1 : 0
+    visible: opacity > 0
+    Behavior on opacity { NumberAnimation { duration: 160 } }
     // It says what it knows. Claiming to be attached when all it knows is that
     // a pane is selected is how an empty screen and a failed one came to look
     // the same.

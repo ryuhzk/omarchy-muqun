@@ -19,13 +19,14 @@ import { Effect, Layer, Schema, Stream } from 'effect';
 import {
   CommandRunner,
   SourceError,
+  type AgentWatch,
   type AttachedPane,
   type TerminalSourceApi,
   type AttachOptions,
   type CommandResult,
   type TerminalSize,
 } from '../application/ports';
-import { parseAgentStatus } from '../domain/agent-status';
+import { AgentStatus, parseAgentStatus } from '../domain/agent-status';
 import { isAgentPane, type Pane } from '../domain/pane';
 
 /**
@@ -152,11 +153,18 @@ function attachScript(paneId: string, size: TerminalSize, takeover: boolean): st
 }
 
 /**
- * Wait on every agent at once, and print the first to stop.
+ * Wait on every agent at once, and print the first to change.
  *
- * `blocked` alone would miss an agent that finished. Both are states where the
- * pane has stopped making progress on its own, which is when the badge should
- * change.
+ * `herdr agent wait` matches a state rather than a transition: asked for
+ * `blocked` on an agent that is already blocked, it answers in a millisecond.
+ * The first version of this asked every agent for `blocked` and `done`, and
+ * on a machine whose agents had finished for the day that was a watch that
+ * returned at once, a re-read of the host, and the same watch again -- a
+ * snapshot, a pane listing and a shell with a wait per agent, about once a
+ * second, for as long as the panel was loaded. The machine's herdr was busier
+ * answering this plugin than running anything. So each agent is asked for
+ * every state but the one it was last seen in, which is the only question
+ * whose answer is news.
  *
  * Each wait is a background job writing its own id when it returns.
  *
@@ -168,12 +176,17 @@ function attachScript(paneId: string, size: TerminalSize, takeover: boolean): st
  * the remote shell a session leader that sshd sends a hangup to, and this trap
  * passes that hangup on to the whole group.
  */
-function watchScript(paneIds: ReadonlyArray<string>): string {
-  const lines = paneIds.map(
-    (id) =>
-      `( herdr agent wait ${shellSingleQuote(id)} --until blocked --until done >/dev/null 2>&1; ` +
-      `printf '%s\\n' ${shellSingleQuote(id)} ) &`
-  );
+export function watchScript(agents: ReadonlyArray<AgentWatch>): string {
+  const lines = agents.map((agent) => {
+    const until = AgentStatus.literals
+      .filter((state) => state !== agent.status)
+      .map((state) => `--until ${state}`)
+      .join(' ');
+    return (
+      `( herdr agent wait ${shellSingleQuote(agent.id)} ${until} >/dev/null 2>&1; ` +
+      `printf '%s\\n' ${shellSingleQuote(agent.id)} ) &`
+    );
+  });
   return [`trap 'kill 0 2>/dev/null' EXIT HUP INT TERM`, ...lines, 'wait'].join('\n');
 }
 
@@ -297,12 +310,12 @@ export const makeHerdrSource = Effect.gen(function* () {
 
     waitForAgents: Effect.fnUntraced(function* (
       alias: string,
-      paneIds: ReadonlyArray<string>
+      agents: ReadonlyArray<AgentWatch>
     ) {
       // With a terminal, so that hanging up takes the waits with it. See
       // `watchScript`: this is the difference between a watch that ends and a
       // watch that is merely abandoned.
-      const session = yield* runner.session(alias, ['sh', '-c', watchScript(paneIds)], {
+      const session = yield* runner.session(alias, ['sh', '-c', watchScript(agents)], {
         pty: true,
       });
       // The first line is the first agent to stop. Taking one and leaving

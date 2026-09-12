@@ -182,6 +182,32 @@ Panel {
     })
   }
 
+  /**
+   * Take a screen update in.
+   *
+   * The sidecar sends the rows that changed, not the screen, and says how many
+   * rows there are. The rows that did not change are kept as the very objects
+   * they already were, which is what lets the view leave them alone. A patch
+   * for a screen of a different size than the one held here is a patch for a
+   * screen this panel has let go of, and the full frame that follows any new
+   * attachment is what fills it back in.
+   */
+  function applyScreen(event) {
+    var rows
+    if (event.full) {
+      rows = []
+    } else {
+      if (root.screenRows.length !== event.rowCount) return
+      rows = root.screenRows.slice()
+    }
+    while (rows.length < event.rowCount) rows.push({ runs: [] })
+    for (var i = 0; i < event.changed.length; i++) {
+      rows[event.changed[i].index] = event.changed[i].row
+    }
+    root.screenRows = rows
+    root.screenCursor = event.cursor
+  }
+
   // Attaching replaces whatever was attached. One pane is watched at a time,
   // which is what a person means by looking at a pane.
   function attachPane(alias, paneId) {
@@ -307,7 +333,12 @@ Panel {
           return
         }
         if (event.type === "hosts") {
-          root.hosts = event.hosts
+          list.pulsePanes = root.newlyBlocked(root.hosts, event.hosts)
+          // A snapshot that says nothing new would still rebuild every row in
+          // the list, so one that reads the same is not taken.
+          if (JSON.stringify(root.hosts) !== JSON.stringify(event.hosts)) {
+            root.hosts = event.hosts
+          }
           root.attention = event.attention
           if (root.selectedPane === "") root.selectMostUrgent()
           return
@@ -320,13 +351,18 @@ Panel {
           var mine = event.alias === root.selectedAlias
             && event.paneId === root.selectedPane
           if (!mine && !root.adoptNextPane) return
+          root.adoptNextPane = false
+          root.applyScreen(event)
           if (!mine) {
             root.selectedAlias = event.alias
             root.selectedPane = event.paneId
+            // A terminal somebody just asked for is the one they want to type
+            // in. Picking a pane in the list hands the keyboard over at the
+            // click; this one cannot, because until this frame there was no
+            // pane to hand it to and the input is disabled while nothing is
+            // selected. So it is handed over here, once there is.
+            Qt.callLater(function() { surface.focusInput() })
           }
-          root.adoptNextPane = false
-          root.screenRows = event.rows
-          root.screenCursor = event.cursor
           return
         }
         if (event.type === "simulators") {
@@ -360,6 +396,35 @@ Panel {
       root.sidecarReady = false
       if (code !== 0) root.lastError = "the sidecar stopped (exit " + code + ")"
     }
+  }
+
+  /** The panes that are waiting now and were not in the snapshot before. */
+  function newlyBlocked(before, after) {
+    var was = {}
+    for (var h = 0; h < before.length; h++) {
+      for (var p = 0; p < before[h].panes.length; p++) {
+        var pane = before[h].panes[p]
+        was[before[h].alias + "\u0000" + pane.id] = pane.status
+      }
+    }
+    var fresh = []
+    for (var i = 0; i < after.length; i++) {
+      for (var j = 0; j < after[i].panes.length; j++) {
+        var now = after[i].panes[j]
+        if (now.status !== "blocked") continue
+        if (was[after[i].alias + "\u0000" + now.id] === "blocked") continue
+        fresh.push(now.id)
+      }
+    }
+    return fresh
+  }
+
+  // The number on the bar gives one beat when it goes up. Down is relief and
+  // needs no announcing.
+  property int seenAttention: 0
+  onAttentionChanged: {
+    if (attention > seenAttention) badgePulse.restart()
+    seenAttention = attention
   }
 
   function selectMostUrgent() {
@@ -531,6 +596,22 @@ Panel {
     tooltipText: root.tooltip()
     onPressed: function() { root.toggle() }
 
+    Behavior on fixedWidth {
+      NumberAnimation { duration: 140; easing.type: Easing.OutCubic }
+    }
+
+    SequentialAnimation {
+      id: badgePulse
+      NumberAnimation {
+        target: mark; property: "scale"; to: 1.25
+        duration: 110; easing.type: Easing.OutCubic
+      }
+      NumberAnimation {
+        target: mark; property: "scale"; to: 1
+        duration: 260; easing.type: Easing.OutBack
+      }
+    }
+
     // A little under the size the bar's other icons are set in. A glyph draws
     // its ink inside its em with room above and below; this drawing fills its
     // whole box, so matching the numbers made it the largest thing up there.
@@ -540,6 +621,7 @@ Panel {
       id: mark
       anchors.centerIn: parent
       spacing: Style.space(4)
+      transformOrigin: Item.Center
 
       Item {
         width: button.markSize
@@ -570,7 +652,9 @@ Panel {
       Text {
         textFormat: Text.PlainText
         anchors.verticalCenter: parent.verticalCenter
-        visible: root.attention > 0
+        opacity: root.attention > 0 ? 1 : 0
+        visible: opacity > 0
+        Behavior on opacity { NumberAnimation { duration: 140 } }
         text: root.attention
         color: button.activeColor
         font.family: button.fontFamily
@@ -671,6 +755,8 @@ Panel {
           font.pixelSize: Style.font.title
           elide: Text.ElideRight
 
+          Behavior on color { ColorAnimation { duration: 120 } }
+
           // The name of the machine is also the way back to the list of them.
           // A settings button would be one more thing in a header that already
           // has three, for something people reach for twice.
@@ -684,6 +770,7 @@ Panel {
         }
 
         Text {
+          id: paneTitle
           textFormat: Text.PlainText
           anchors.left: parent.left
           anchors.leftMargin: Style.space(16) + hostName.width + Style.space(16)
@@ -699,6 +786,14 @@ Panel {
           font.family: root.mono
           font.pixelSize: Style.font.subtitle
           elide: Text.ElideRight
+
+          // A new name settles in rather than replacing the old one in place.
+          onTextChanged: titleIn.restart()
+          NumberAnimation {
+            id: titleIn
+            target: paneTitle; property: "opacity"; from: 0.3; to: 1
+            duration: 200; easing.type: Easing.OutCubic
+          }
         }
 
         // What the host turned out to have, or why it cannot be read. Words
@@ -739,6 +834,19 @@ Panel {
             fontFamily: root.mono
             hint: "Settings"
             onActivated: root.openSettings()
+          }
+
+          // U+F08E is the Nerd Font "open in a new window" arrow. The farm's
+          // own web page, for what the strip does not do. It lived at the foot
+          // of the strip as two words under the device's buttons, where it
+          // read as one more button; it is a way out of this window, so it
+          // sits with the other things that are.
+          IconAction {
+            text: ""
+            fontFamily: root.mono
+            hint: "Open in browser"
+            visible: root.simfarmOpen && root.simfarmOpenUrl !== ""
+            onActivated: root.openSimfarm()
           }
 
           // U+F10B is the Nerd Font phone glyph, written as an escape because a
@@ -883,7 +991,10 @@ Panel {
 
             MachineList {
               anchors.fill: parent
-              visible: root.showSetup
+              z: 1
+              opacity: root.showSetup ? 1 : 0
+              visible: opacity > 0
+              Behavior on opacity { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
               hosts: root.hosts
               fontFamily: root.mono
               onHostAdded: function(alias) { root.addHost(alias) }
@@ -942,8 +1053,12 @@ Panel {
             id: notice
             textFormat: Text.PlainText
             width: parent.width
-            height: visible ? implicitHeight : 0
-            visible: root.lastError !== ""
+            clip: true
+            height: root.lastError !== "" ? implicitHeight : 0
+            opacity: root.lastError !== "" ? 1 : 0
+            visible: height > 0
+            Behavior on height { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+            Behavior on opacity { NumberAnimation { duration: 160 } }
             text: root.lastError
             color: Color.urgent
             font.family: root.mono
@@ -996,7 +1111,6 @@ Panel {
           selectedId: root.simfarmDevice
           framePath: root.simfarmFramePath
           frameRevision: root.simfarmFrameRevision
-          openUrl: root.simfarmOpenUrl
           fontFamily: root.mono
           onDevicePicked: function(deviceId) { root.showDevice(deviceId) }
           onTapped: function(phase, x, y) {
@@ -1008,7 +1122,6 @@ Panel {
           onButtonPressed: function(button) {
             root.send({ type: "deviceButton", button: button })
           }
-          onOpenRequested: root.openSimfarm()
           startCommand: root.simfarmCommand
           shortAddress: root.simfarmAddress
           canStart: root.simfarmMachine !== ""

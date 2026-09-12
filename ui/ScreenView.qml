@@ -140,18 +140,26 @@ Item {
     spacing: 0
 
     Repeater {
-      model: root.rows
+      // Counted rather than handed the array. A Repeater given a new array
+      // throws away every delegate and builds them all again, so a screen on
+      // which one row had changed was fifty rows of items destroyed and remade
+      // twenty times a second, and the shell that also draws the bar spent half
+      // a core on it. Given a count it keeps its rows, and each row watches its
+      // own entry in the array: only a row that was actually replaced rebuilds
+      // its runs, and the sidecar replaces only the rows that changed.
+      model: root.rows.length
 
       Item {
         id: line
-        required property var modelData
+        required property int index
+        readonly property var row: root.rows[index]
         width: parent.width
         // A blank row still occupies a line. A terminal's empty lines are part
         // of how its output is laid out, not whitespace to collapse.
         height: root.cellHeight
 
         Repeater {
-          model: line.modelData.runs
+          model: line.row ? line.row.runs : []
 
           Item {
             id: cellRun
@@ -290,5 +298,13 @@ Item {
     border.width: root.focused ? 0 : 1
     border.color: Color.accent
     opacity: root.focused ? 0.65 : 0.5
+
+    // The cursor glides rather than jumps. Short enough that typing never
+    // feels behind the keys, long enough that the eye can follow it across a
+    // line, which is what a jump loses.
+    Behavior on x { NumberAnimation { duration: 50 } }
+    Behavior on y { NumberAnimation { duration: 50 } }
+    Behavior on color { ColorAnimation { duration: 120 } }
+    Behavior on opacity { NumberAnimation { duration: 120 } }
   }
 }

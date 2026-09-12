@@ -20,7 +20,6 @@ Item {
   property string framePath: ""
   property int frameRevision: 0
   property bool configured: false
-  property string openUrl: ""
   property string fontFamily: "monospace"
   /** Whether the device list is dropped down. Closed is the resting state. */
   property bool pickerOpen: false
@@ -29,7 +28,6 @@ Item {
   signal tapped(string phase, real x, real y)
   signal scrolled(real dx, real dy, real x, real y)
   signal buttonPressed(string button)
-  signal openRequested()
   /** Open a terminal on the machine and start the server in it. */
   signal startRequested()
   /** Open the project's page in a browser. */
@@ -207,8 +205,7 @@ Item {
     Item {
       id: stage
       width: parent.width
-      height: parent.height - picker.height - footer.height - buttonRow.height
-        - Style.space(24)
+      height: parent.height - picker.height - buttonRow.height - Style.space(24)
 
       readonly property real deviceRatio: root.selectedDevice
           && root.selectedDevice.width > 0 && root.selectedDevice.height > 0
@@ -378,7 +375,7 @@ Item {
     Flow {
       id: buttonRow
       width: parent.width
-      spacing: Style.space(4)
+      spacing: Style.space(6)
       visible: root.selectedDevice !== null
 
       Repeater {
@@ -393,9 +390,15 @@ Item {
           height: visible ? buttonLabel.implicitHeight + Style.space(6) : 0
           radius: Style.cornerRadius
           color: buttonHover.hovered ? Style.hoverFill : Style.normalFill
+          // Pressed reads as pressed: it dips while the button is held.
+          scale: buttonTap.pressed ? 0.94 : 1
+          transformOrigin: Item.Center
+
+          Behavior on color { ColorAnimation { duration: 120 } }
+          Behavior on scale { NumberAnimation { duration: 90; easing.type: Easing.OutCubic } }
 
           HoverHandler { id: buttonHover }
-          TapHandler { onTapped: root.buttonPressed(modelData) }
+          TapHandler { id: buttonTap; onTapped: root.buttonPressed(modelData) }
 
           Text {
             id: buttonLabel
@@ -407,26 +410,6 @@ Item {
             font.pixelSize: Style.font.caption
           }
         }
-      }
-    }
-
-    Item {
-      id: footer
-      width: parent.width
-      height: openLink.implicitHeight
-
-      Text {
-        id: openLink
-        textFormat: Text.PlainText
-        anchors.left: parent.left
-        visible: root.configured && root.openUrl !== ""
-        text: "open simfarm"
-        color: openHover.hovered ? Color.accent : root.muted
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
-
-        HoverHandler { id: openHover }
-        TapHandler { onTapped: root.openRequested() }
       }
     }
   }

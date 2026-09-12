@@ -33,9 +33,15 @@ Item {
          : Qt.rgba(Color.popups.text.r, Color.popups.text.g, Color.popups.text.b, 0.42)
     font.family: root.fontFamily
     font.pixelSize: Style.font.icon
+    // A touch larger under the pointer, the way the bar's own buttons answer.
+    scale: hover.hovered ? 1.12 : 1
+    transformOrigin: Item.Center
 
     Behavior on color {
       ColorAnimation { duration: 120 }
+    }
+    Behavior on scale {
+      NumberAnimation { duration: 110; easing.type: Easing.OutCubic }
     }
   }
 
@@ -51,10 +57,30 @@ Item {
   // The name of the thing, on hover. A glyph is quick to read once you know it
   // and unreadable the first time, which is the whole reason this is here.
   Rectangle {
-    visible: hover.hovered && root.hint !== ""
-    anchors.horizontalCenter: parent.horizontalCenter
+    id: hintBox
+    readonly property bool shown: hover.hovered && root.hint !== ""
+    opacity: shown ? 1 : 0
+    visible: opacity > 0
+    // Centred under the glyph where there is room, and pulled in where there
+    // is not. The last of these sits against the window's right edge, and a
+    // label centred under it lost its second half to that edge.
+    x: {
+      var centred = (root.width - width) / 2
+      var margin = Style.space(12)
+      var atWindow = root.mapToItem(null, centred, 0).x
+      var limit = root.Window.width - margin
+      if (atWindow + width > limit) return centred - (atWindow + width - limit)
+      if (atWindow < margin) return centred + (margin - atWindow)
+      return centred
+    }
     anchors.top: parent.bottom
-    anchors.topMargin: Style.space(6)
+    // It settles into place rather than appearing there.
+    anchors.topMargin: shown ? Style.space(6) : Style.space(2)
+
+    Behavior on opacity { NumberAnimation { duration: 120 } }
+    Behavior on anchors.topMargin {
+      NumberAnimation { duration: 140; easing.type: Easing.OutCubic }
+    }
     width: hintLabel.implicitWidth + Style.space(12)
     height: hintLabel.implicitHeight + Style.space(6)
     radius: Style.cornerRadius

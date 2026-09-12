@@ -95,3 +95,55 @@ export function rowText(row: Row): string {
 export function screenText(rows: ReadonlyArray<Row>): string {
   return rows.map(rowText).join('\n');
 }
+
+/** One row the panel has not seen in this form, and where it goes. */
+export interface ChangedRow {
+  readonly index: number;
+  readonly row: Row;
+}
+
+/** What the panel is sent for one frame, and what to remember for the next. */
+export interface ScreenDelta {
+  /**
+   * Whether this is the whole screen rather than a patch on the last one.
+   *
+   * True the first time, and whenever the screen changed shape: a patch on a
+   * screen of a different size would be applied to rows that do not line up.
+   */
+  readonly full: boolean;
+  /** The rows that differ from what was last sent, in order. All of them when `full`. */
+  readonly changed: ReadonlyArray<ChangedRow>;
+  /** How many rows the screen has now. */
+  readonly rowCount: number;
+  /** One key per row as just sent, to hand back next time. */
+  readonly keys: ReadonlyArray<string>;
+}
+
+/**
+ * The rows that changed since the panel was last told.
+ *
+ * A pane that prints a line changes one row, and a program that redraws its
+ * status bar changes one row, but the terminal hands back a whole new screen
+ * of new objects every time it is asked. Comparing what was sent with what is
+ * there now, row by row, is what turns a screen a frame into a row a frame.
+ * The panel keeps the rows it already has and replaces only these, which is
+ * also what keeps its drawing of the unchanged rows in place.
+ *
+ * Rows are compared by their encoded form because that is what the panel
+ * receives: two rows that encode the same are the same row to it, whatever
+ * objects they were here.
+ */
+export function screenDelta(
+  sent: ReadonlyArray<string> | null,
+  rows: ReadonlyArray<Row>
+): ScreenDelta {
+  const keys = rows.map((row) => JSON.stringify(row));
+  const full = sent === null || sent.length !== rows.length;
+  const changed: Array<ChangedRow> = [];
+  for (let index = 0; index < rows.length; index += 1) {
+    const row = rows[index];
+    if (row === undefined) continue;
+    if (full || keys[index] !== sent[index]) changed.push({ index, row });
+  }
+  return { full, changed, rowCount: rows.length, keys };
+}

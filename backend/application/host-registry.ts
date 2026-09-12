@@ -6,10 +6,10 @@
  * panel should be told something changed.
  */
 
-import { Cause, Context, Effect, Fiber, Layer, Queue, Schedule, Stream } from 'effect';
+import { Cause, Clock, Context, Effect, Fiber, Layer, Queue, Schedule, Stream } from 'effect';
 import { attentionCount, connectingHost, type Capability, type Host } from '../domain/host';
 import { isAgentPane, type Pane } from '../domain/pane';
-import type { Row } from '../domain/screen';
+import { screenDelta, type ChangedRow } from '../domain/screen';
 import { browserUrl, type SimfarmConfig, type SimulatorDevice } from '../domain/simfarm';
 import {
   FRAME_INTERVAL_MS,
@@ -22,6 +22,7 @@ import {
   Clipboard,
   CommandRunner,
   Simulators,
+  type AgentWatch,
   type SimulatorInput,
   TerminalFactory,
   TerminalSources,
@@ -38,7 +39,11 @@ export type Change =
       readonly type: 'screen';
       readonly alias: string;
       readonly paneId: string;
-      readonly rows: ReadonlyArray<Row>;
+      /** Whether `changed` is the whole screen or a patch on the last one. */
+      readonly full: boolean;
+      readonly rowCount: number;
+      /** The rows that differ from the last frame sent. */
+      readonly changed: ReadonlyArray<ChangedRow>;
       readonly cursor: CursorState;
     }
   | { readonly type: 'error'; readonly alias: string; readonly message: string }
@@ -67,6 +72,27 @@ const IDLE_REFRESH_MS = 60_000;
 
 /** A probe or refresh that hangs must not wedge a host's whole fiber. */
 const COMMAND_TIMEOUT_MS = 20_000;
+
+/**
+ * How long a watch has to stay up before its answer counts as an event.
+ *
+ * A watch is a question the far side answers when an agent changes. One that
+ * comes back sooner than this did not see a change: it saw something that
+ * answers at once -- an agent that has gone, a tool that is not answering, a
+ * question phrased so that the current state already satisfies it. That
+ * happened: a watch that named the state its agents were already in came back
+ * in a millisecond, and the loop re-read the host and armed it again, about
+ * once a second, for thirteen hours. The tool on the far side spent its time
+ * answering this plugin.
+ */
+const WATCH_SETTLE_MS = 3_000;
+
+/**
+ * The first pause after a watch that came back at once, doubled for each one
+ * in a row and capped at the idle refresh. Long enough that a machine which
+ * keeps answering at once is asked at the idle rate rather than the loop's.
+ */
+const WATCH_BACKOFF_MS = 1_000;
 
 /**
  * The most wheel notches one gesture sends onward.
@@ -176,16 +202,24 @@ const makeRegistry = Effect.gen(function* () {
     return pane === undefined ? null : sourceOfKind(alias, pane.source);
   };
 
-  /** Ask the host what it has, and remember every source it can offer. */
+  /**
+   * Ask the host what it has, and remember every source it can offer.
+   *
+   * Every tool is asked at once. Each question is a round trip over the same
+   * connection, and a machine on another network answers each in a few hundred
+   * milliseconds; asked in turn, the host took as long to appear as the sum of
+   * them. The answers keep the order the tools are offered in.
+   */
   const probe = Effect.fnUntraced(function* (alias: string) {
-    const found: Array<TerminalSourceApi> = [];
-
-    for (const candidate of sources.all) {
-      const present = yield* candidate
-        .available(alias)
-        .pipe(Effect.timeout(COMMAND_TIMEOUT_MS), Effect.catch(() => Effect.succeed(false)));
-      if (present) found.push(candidate);
-    }
+    const present = yield* Effect.forEach(
+      sources.all,
+      (candidate) =>
+        candidate
+          .available(alias)
+          .pipe(Effect.timeout(COMMAND_TIMEOUT_MS), Effect.catch(() => Effect.succeed(false))),
+      { concurrency: 'unbounded' }
+    );
+    const found = sources.all.filter((_, index) => present[index] === true);
 
     const capabilities: Array<Capability> = found.map((source) => source.kind);
 
@@ -214,20 +248,29 @@ const makeRegistry = Effect.gen(function* () {
     const list = sourcesFor(alias);
     if (list.length === 0) return [] as ReadonlyArray<Pane>;
 
+    // All of them at once, for the reason `probe` gives; the answers come back
+    // in the order the sources are offered, so herdr's agents still lead.
+    const answers = yield* Effect.forEach(
+      list,
+      (source) =>
+        source.panes(alias).pipe(
+          Effect.timeout(COMMAND_TIMEOUT_MS),
+          Effect.map((panes) => ({ panes, failure: null as string | null })),
+          Effect.catch((error) =>
+            Effect.succeed({
+              panes: [] as ReadonlyArray<Pane>,
+              failure: error instanceof Error ? error.message : String(error),
+            })
+          )
+        ),
+      { concurrency: 'unbounded' }
+    );
+
     const collected: Array<Pane> = [];
     let failure: string | null = null;
-
-    for (const source of list) {
-      const panes = yield* source.panes(alias).pipe(
-        Effect.timeout(COMMAND_TIMEOUT_MS),
-        Effect.catch((error) =>
-          Effect.sync(() => {
-            failure = error instanceof Error ? error.message : String(error);
-            return [] as ReadonlyArray<Pane>;
-          })
-        )
-      );
-      collected.push(...panes);
+    for (const answer of answers) {
+      collected.push(...answer.panes);
+      if (answer.failure !== null) failure = answer.failure;
     }
 
     if (collected.length === 0 && failure !== null) {
@@ -276,6 +319,9 @@ const makeRegistry = Effect.gen(function* () {
      */
     let watcher: Fiber.Fiber<void, never> | null = null;
     let armed = '';
+    // When the watch went up, and how many in a row have come straight back.
+    let armedAt = 0;
+    let quickAnswers = 0;
 
     while (true) {
       const panes: ReadonlyArray<Pane> = yield* refresh(alias).pipe(
@@ -289,18 +335,28 @@ const makeRegistry = Effect.gen(function* () {
 
       // One watch per source that has agents. A source with none sits out
       // rather than holding a connection open to say nothing.
+      //
+      // Each agent goes with the state it was just seen in, because a watch is
+      // for a change from that state and not for a state in itself.
       const wanted = sourcesFor(alias)
         .map((source) => ({
           source,
           agents: panes
             .filter((pane) => pane.source === source.kind && isAgentPane(pane))
-            .map((pane) => pane.id)
-            .sort(),
+            .map((pane): AgentWatch => ({ id: pane.id, status: pane.status }))
+            .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
         }))
         .filter((entry) => entry.agents.length > 0);
 
+      // The state is part of the signature. An agent the idle refresh finds in
+      // a new state has a watch up that is asking about a state it has already
+      // left, and that watch has to be remade against where it is now.
       const signature = wanted
-        .map((entry) => `${entry.source.kind}:${entry.agents.join(',')}`)
+        .map(
+          (entry) =>
+            `${entry.source.kind}:` +
+            entry.agents.map((agent) => `${agent.id}=${agent.status}`).join(',')
+        )
         .join('|');
 
       if (signature !== armed) {
@@ -309,6 +365,7 @@ const makeRegistry = Effect.gen(function* () {
         armed = signature;
 
         if (signature !== '') {
+          armedAt = yield* Clock.currentTimeMillis;
           watcher = yield* Effect.forkScoped(
             Effect.raceAll(
               wanted.map((entry) =>
@@ -342,6 +399,19 @@ const makeRegistry = Effect.gen(function* () {
         yield* Fiber.interrupt(current);
         watcher = null;
         armed = '';
+
+        // A watch that came straight back is not an event, and arming another
+        // straight away would only ask the same question again. Each one in a
+        // row waits longer before the next, so a machine that keeps answering
+        // at once ends up asked at the idle rate rather than in a loop.
+        const now = yield* Clock.currentTimeMillis;
+        if (now - armedAt < WATCH_SETTLE_MS) {
+          quickAnswers += 1;
+          const pause = Math.min(IDLE_REFRESH_MS, WATCH_BACKOFF_MS * 2 ** (quickAnswers - 1));
+          yield* Effect.sleep(pause);
+        } else {
+          quickAnswers = 0;
+        }
       }
     }
   });
@@ -454,6 +524,10 @@ const makeRegistry = Effect.gen(function* () {
     paneId: string;
     terminal: Terminal;
     write(data: string): Effect.Effect<void>;
+    /** One key per row as last sent, or nothing when the panel has seen none. */
+    sent: ReadonlyArray<string> | null;
+    /** The cursor as last sent, so a frame that moved nothing is not sent. */
+    sentCursor: string;
   } | null = null;
   let attachedFiber: Fiber.Fiber<void, never> | null = null;
 
@@ -490,14 +564,33 @@ const makeRegistry = Effect.gen(function* () {
       return Effect.void;
     });
 
+  /**
+   * Tell the panel what changed on the screen since it was last told.
+   *
+   * The rows that differ, not the screen. A pane that prints a line has
+   * changed one row, and the panel keeps the rest as they are; a frame on
+   * which nothing at all moved is not sent. The first frame after an
+   * attachment is the whole screen, because the panel holds nothing yet.
+   */
   const publishScreen = Effect.suspend(() => {
     if (attached === null) return Effect.void;
+    const target = attached;
+    const delta = screenDelta(target.sent, target.terminal.rows());
+    const cursor = target.terminal.cursor();
+    const cursorKey = `${cursor.row}:${cursor.column}:${cursor.visible}`;
+    if (!delta.full && delta.changed.length === 0 && cursorKey === target.sentCursor) {
+      return Effect.void;
+    }
+    target.sent = delta.keys;
+    target.sentCursor = cursorKey;
     return Queue.offer(changes, {
       type: 'screen' as const,
-      alias: attached.alias,
-      paneId: attached.paneId,
-      rows: attached.terminal.rows(),
-      cursor: attached.terminal.cursor(),
+      alias: target.alias,
+      paneId: target.paneId,
+      full: delta.full,
+      rowCount: delta.rowCount,
+      changed: delta.changed,
+      cursor,
     }).pipe(Effect.asVoid);
   });
 
@@ -554,7 +647,7 @@ const makeRegistry = Effect.gen(function* () {
           const terminal = carried ?? terminals.create(size);
           if (carried !== null) carried.resize(size);
           const pane = yield* source.attach(alias, paneId, size, { takeover: true });
-          attached = { alias, paneId, terminal, write: pane.write };
+          attached = { alias, paneId, terminal, write: pane.write, sent: null, sentCursor: '' };
 
           // Whatever was typed while this was opening, now that there is
           // somewhere to put it.
@@ -600,6 +693,7 @@ const makeRegistry = Effect.gen(function* () {
                 if (carriedStill) {
                   carriedStill = false;
                   terminal.reset();
+                  if (attached !== null) attached.sent = null;
                 }
                 terminal.write(chunk);
                 dirty = true;
