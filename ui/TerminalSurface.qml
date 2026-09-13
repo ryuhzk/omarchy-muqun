@@ -249,9 +249,28 @@ FocusScope {
 
       // A control combination has no character to commit, so it is named here
       // and turned into its control code by the sidecar.
-      if ((event.modifiers & Qt.ControlModifier) && event.key >= Qt.Key_A
-          && event.key <= Qt.Key_Z) {
+      if (control && event.key >= Qt.Key_A && event.key <= Qt.Key_Z) {
         root.keyEntered("C-" + String.fromCharCode(event.key).toLowerCase())
+        event.accepted = true
+        return
+      }
+      if (control && event.key === Qt.Key_Space) {
+        root.keyEntered("C-Space")
+        event.accepted = true
+        return
+      }
+      if (control && "@[\\]^_".indexOf(String.fromCharCode(event.key)) >= 0) {
+        root.keyEntered("C-" + String.fromCharCode(event.key))
+        event.accepted = true
+        return
+      }
+
+      // Alt with a character is escape and then the character, which is what
+      // readline and every editor read as a word-wise motion. The field does
+      // not commit text while alt is down, so it is named here.
+      if ((event.modifiers & Qt.AltModifier) && event.text !== ""
+          && event.text.charCodeAt(0) >= 32) {
+        root.keyEntered("M-" + event.text)
         event.accepted = true
       }
     }
@@ -260,22 +279,36 @@ FocusScope {
   // The keys that have no character of their own. Everything printable goes
   // through the field above, so this list stays short and does not need to know
   // about layouts or input methods.
+  //
+  // The name carries the modifiers held, as `C-S-Up`, and the sidecar turns
+  // that into what a terminal sends. Shift-tab is its own key to Qt --
+  // `Key_Backtab`, not tab with shift -- which is why it was never seen here
+  // before, and why an agent's "shift+tab to cycle" did nothing.
   function keyNameFor(event) {
-    if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-      return (event.modifiers & Qt.ShiftModifier) ? "S-Enter" : "Enter"
+    var base = ""
+    if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) base = "Enter"
+    else if (event.key === Qt.Key_Escape) base = "Escape"
+    else if (event.key === Qt.Key_Backspace) base = "BSpace"
+    else if (event.key === Qt.Key_Delete) base = "Delete"
+    else if (event.key === Qt.Key_Insert) base = "Insert"
+    else if (event.key === Qt.Key_Backtab) return "BTab"
+    else if (event.key === Qt.Key_Tab) base = "Tab"
+    else if (event.key === Qt.Key_Up) base = "Up"
+    else if (event.key === Qt.Key_Down) base = "Down"
+    else if (event.key === Qt.Key_Left) base = "Left"
+    else if (event.key === Qt.Key_Right) base = "Right"
+    else if (event.key === Qt.Key_Home) base = "Home"
+    else if (event.key === Qt.Key_End) base = "End"
+    else if (event.key === Qt.Key_PageUp) base = "PageUp"
+    else if (event.key === Qt.Key_PageDown) base = "PageDown"
+    else if (event.key >= Qt.Key_F1 && event.key <= Qt.Key_F12) {
+      base = "F" + (event.key - Qt.Key_F1 + 1)
     }
-    if (event.key === Qt.Key_Escape) return "Escape"
-    if (event.key === Qt.Key_Backspace) return "BSpace"
-    if (event.key === Qt.Key_Delete) return "Delete"
-    if (event.key === Qt.Key_Tab) return (event.modifiers & Qt.ShiftModifier) ? "BTab" : "Tab"
-    if (event.key === Qt.Key_Up) return "Up"
-    if (event.key === Qt.Key_Down) return "Down"
-    if (event.key === Qt.Key_Left) return "Left"
-    if (event.key === Qt.Key_Right) return "Right"
-    if (event.key === Qt.Key_Home) return "Home"
-    if (event.key === Qt.Key_End) return "End"
-    if (event.key === Qt.Key_PageUp) return "PageUp"
-    if (event.key === Qt.Key_PageDown) return "PageDown"
-    return ""
+    if (base === "") return ""
+    var name = base
+    if (event.modifiers & Qt.ShiftModifier) name = "S-" + name
+    if (event.modifiers & Qt.AltModifier) name = "M-" + name
+    if (event.modifiers & Qt.ControlModifier) name = "C-" + name
+    return name
   }
 }

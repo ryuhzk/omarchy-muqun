@@ -43,6 +43,55 @@ describe('keys', () => {
     expect(keyToBytes('S-Enter')).toBe(`${ESC}\r`);
   });
 
+  test('shift-tab is the back-tab sequence', () => {
+    // What agents read as "cycle the other way", and what a terminal has
+    // always sent for it.
+    expect(keyToBytes('BTab')).toBe(`${ESC}[Z`);
+    expect(keyToBytes('S-Tab')).toBe(`${ESC}[Z`);
+  });
+
+  test('the function keys are what xterm sends', () => {
+    expect(keyToBytes('F1')).toBe(`${ESC}OP`);
+    expect(keyToBytes('F4')).toBe(`${ESC}OS`);
+    expect(keyToBytes('F5')).toBe(`${ESC}[15~`);
+    expect(keyToBytes('F12')).toBe(`${ESC}[24~`);
+  });
+
+  test('insert has its own tilde sequence', () => {
+    expect(keyToBytes('Insert')).toBe(`${ESC}[2~`);
+  });
+
+  test('a modifier on an arrow or a home key goes in as the xterm parameter', () => {
+    // 2 is shift, 3 alt, 5 ctrl, 6 ctrl-shift: one plus the sum of the bits.
+    expect(keyToBytes('S-Up')).toBe(`${ESC}[1;2A`);
+    expect(keyToBytes('M-Left')).toBe(`${ESC}[1;3D`);
+    expect(keyToBytes('C-Right')).toBe(`${ESC}[1;5C`);
+    expect(keyToBytes('C-S-Down')).toBe(`${ESC}[1;6B`);
+    expect(keyToBytes('C-Home')).toBe(`${ESC}[1;5H`);
+    expect(keyToBytes('S-End')).toBe(`${ESC}[1;2F`);
+  });
+
+  test('a modifier on a tilde key goes before the tilde', () => {
+    expect(keyToBytes('S-Delete')).toBe(`${ESC}[3;2~`);
+    expect(keyToBytes('C-PageUp')).toBe(`${ESC}[5;5~`);
+    expect(keyToBytes('S-F5')).toBe(`${ESC}[15;2~`);
+    expect(keyToBytes('S-F1')).toBe(`${ESC}[1;2P`);
+  });
+
+  test('the control characters outside the letters', () => {
+    expect(keyToBytes('C-Space')).toBe(String.fromCharCode(0));
+    expect(keyToBytes('C-@')).toBe(String.fromCharCode(0));
+    expect(keyToBytes('C-[')).toBe(ESC);
+    expect(keyToBytes('C-\\')).toBe(String.fromCharCode(0x1c));
+    expect(keyToBytes('C-]')).toBe(String.fromCharCode(0x1d));
+    expect(keyToBytes('C-_')).toBe(String.fromCharCode(0x1f));
+  });
+
+  test('alt with a named key prefixes the sequence with escape', () => {
+    expect(keyToBytes('M-Enter')).toBe(`${ESC}\r`);
+    expect(keyToBytes('M-BSpace')).toBe(`${ESC}${String.fromCharCode(0x7f)}`);
+  });
+
   test('a name this build does not know sends nothing', () => {
     // Sending the name itself would type the word into whatever is running.
     expect(keyToBytes('Pause')).toBe('');

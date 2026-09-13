@@ -25,46 +25,130 @@ import { TerminalSource, type TerminalSize } from './ports';
  */
 const ESC = String.fromCharCode(0x1b);
 
-const KEY_BYTES: Readonly<Record<string, string>> = {
+/**
+ * Keys that are one fixed sequence whatever else is held.
+ *
+ * The names are the panel's, which are the ones a person would say. The bytes
+ * are what an xterm-compatible terminal sends, because that is what everything
+ * on the far side expects to read.
+ */
+const PLAIN_KEYS: Readonly<Record<string, string>> = {
   Enter: '\r',
   Return: '\r',
   Tab: '\t',
   BTab: `${ESC}[Z`,
   Escape: ESC,
   BSpace: String.fromCharCode(0x7f),
-  Delete: `${ESC}[3~`,
-  Up: `${ESC}[A`,
-  Down: `${ESC}[B`,
-  Right: `${ESC}[C`,
-  Left: `${ESC}[D`,
-  Home: `${ESC}[H`,
-  End: `${ESC}[F`,
-  PageUp: `${ESC}[5~`,
-  PageDown: `${ESC}[6~`,
-  // Shift-enter is how agents take a newline without submitting. Terminals
-  // have no separate code for it, so it goes as the escape-prefixed return
-  // that readline and the agents both read as "insert a line".
-  'S-Enter': `${ESC}\r`,
 };
+
+/**
+ * Keys whose sequence ends in a letter: `ESC [ A` for up, and `ESC [ 1 ; 2 A`
+ * for shift-up. The home keys are the same family, which is why they are here
+ * and not with the tilde keys.
+ */
+const LETTER_KEYS: Readonly<Record<string, string>> = {
+  Up: 'A',
+  Down: 'B',
+  Right: 'C',
+  Left: 'D',
+  Home: 'H',
+  End: 'F',
+};
+
+/** The first four function keys: `ESC O P` alone, `ESC [ 1 ; 2 P` with shift. */
+const SS3_KEYS: Readonly<Record<string, string>> = { F1: 'P', F2: 'Q', F3: 'R', F4: 'S' };
+
+/** Keys whose sequence is a number and a tilde: `ESC [ 3 ~` for delete. */
+const TILDE_KEYS: Readonly<Record<string, number>> = {
+  Insert: 2,
+  Delete: 3,
+  PageUp: 5,
+  PageDown: 6,
+  F5: 15,
+  F6: 17,
+  F7: 18,
+  F8: 19,
+  F9: 20,
+  F10: 21,
+  F11: 23,
+  F12: 24,
+};
+
+/**
+ * The control characters that are not a letter's.
+ *
+ * ctrl-space and ctrl-@ are both NUL; the brackets, backslash, caret and
+ * underscore are the four after the letters, which is where escape lives.
+ */
+const CONTROL_KEYS: Readonly<Record<string, number>> = {
+  Space: 0,
+  '@': 0,
+  '[': 0x1b,
+  '\\': 0x1c,
+  ']': 0x1d,
+  '^': 0x1e,
+  _: 0x1f,
+};
+
+/** The modifiers a name may begin with, and the bit each contributes. */
+const MODIFIER_BITS: Readonly<Record<string, number>> = { S: 1, M: 2, C: 4 };
 
 /**
  * Translate a key name into the bytes a keyboard would have sent.
  *
- * `C-<letter>` becomes the control code for that letter, which is how ctrl-c
- * reaches a program as an interrupt rather than as the letter c.
+ * A name is modifiers, then a key: `C-S-Up` is ctrl and shift on up. The
+ * modifiers on a named key become the xterm parameter, one plus the sum of
+ * their bits, so that shift-up is `ESC [ 1 ; 2 A` and every program that reads
+ * a modern terminal reads it. `C-<letter>` becomes the control code for that
+ * letter, which is how ctrl-c reaches a program as an interrupt rather than as
+ * the letter c; `M-<anything>` is escape and then the thing, which is what alt
+ * has meant since before there were function keys.
  */
 export function keyToBytes(key: string): string {
-  const named = KEY_BYTES[key];
-  if (named !== undefined) return named;
+  let bits = 0;
+  let rest = key;
+  while (rest.length > 2 && rest[1] === '-' && MODIFIER_BITS[rest[0]!] !== undefined) {
+    bits |= MODIFIER_BITS[rest[0]!]!;
+    rest = rest.slice(2);
+  }
+  if (rest === '') return '';
 
-  const control = /^C-([a-z])$/.exec(key);
+  const shift = (bits & 1) !== 0;
+  const alt = (bits & 2) !== 0;
+  const control = (bits & 4) !== 0;
+  const prefix = alt ? ESC : '';
+
+  // Shift-enter is how agents take a newline without submitting. Terminals
+  // have no separate code for it, so it goes as the escape-prefixed return that
+  // readline and the agents both read as "insert a line".
+  if (rest === 'Enter' && shift) return `${ESC}\r`;
+  if (rest === 'Tab' && shift) return `${prefix}${ESC}[Z`;
+
+  const plain = PLAIN_KEYS[rest];
+  if (plain !== undefined) return `${prefix}${plain}`;
+
+  const parameter = bits === 0 ? '' : `;${1 + bits}`;
+
+  const letter = LETTER_KEYS[rest];
+  if (letter !== undefined) {
+    return bits === 0 ? `${ESC}[${letter}` : `${ESC}[1${parameter}${letter}`;
+  }
+  const ss3 = SS3_KEYS[rest];
+  if (ss3 !== undefined) {
+    return bits === 0 ? `${ESC}O${ss3}` : `${ESC}[1${parameter}${ss3}`;
+  }
+  const tilde = TILDE_KEYS[rest];
+  if (tilde !== undefined) return `${ESC}[${tilde}${parameter}~`;
+
   if (control) {
-    const letter = control[1]!;
-    return String.fromCharCode(letter.charCodeAt(0) - 96);
+    if (/^[a-z]$/.test(rest)) {
+      return `${prefix}${String.fromCharCode(rest.charCodeAt(0) - 96)}`;
+    }
+    const code = CONTROL_KEYS[rest];
+    if (code !== undefined) return `${prefix}${String.fromCharCode(code)}`;
   }
 
-  const alt = /^M-(.)$/.exec(key);
-  if (alt) return ESC + alt[1]!;
+  if (alt && !control && [...rest].length === 1) return ESC + rest;
 
   // A name this build does not know sends nothing rather than sending the name
   // itself, which would type the word "Pause" into whatever is running.
