@@ -23,6 +23,7 @@ import {
   CommandRunner,
   Simulators,
   type AgentWatch,
+  type NewAgentRequest,
   type SimulatorInput,
   TerminalFactory,
   TerminalSources,
@@ -800,7 +801,15 @@ const makeRegistry = Effect.gen(function* () {
       Effect.suspend(() => {
         const source = sourcesFor(alias).find((candidate) => candidate.newPane !== undefined);
         const make = source?.newPane;
-        if (source === undefined || make === undefined) return Effect.void;
+        if (source === undefined || make === undefined) {
+          // Said, not swallowed. The button that asks for this is hidden on
+          // such a host, but the simulator strip's "start the server" is not,
+          // and a click that did nothing was a click nobody could explain.
+          return report(
+            alias,
+            new Error('this machine has no tmux, so there is nowhere to open a terminal')
+          );
+        }
         // Not wrapped in `guard`: attaching forks into the service's scope, so
         // this effect carries one, and reporting is done here instead.
         return make.call(source, alias).pipe(
@@ -827,6 +836,31 @@ const makeRegistry = Effect.gen(function* () {
     /** Whether this host can make a terminal that was not there before. */
     canOpenTerminal: (alias: string) =>
       sourcesFor(alias).some((candidate) => candidate.newPane !== undefined),
+
+    /**
+     * Start an agent on a host and sit down in front of it.
+     *
+     * The herdr counterpart of `newTerminal`. The place is made and the agent
+     * started by the source; then the host is re-read so the pane appears in
+     * the list with its agent, and attached so the person is looking at it.
+     */
+    newAgent: (alias: string, request: NewAgentRequest, size: TerminalSize) =>
+      Effect.suspend(() => {
+        const source = sourcesFor(alias).find((candidate) => candidate.newAgent !== undefined);
+        const make = source?.newAgent;
+        if (source === undefined || make === undefined) {
+          return report(alias, new Error('this machine has no herdr, so there is no way to start an agent'));
+        }
+        return make.call(source, alias, request).pipe(
+          Effect.andThen((paneId) =>
+            refresh(alias).pipe(
+              Effect.andThen(paneId === '' ? Effect.void : attachPane(alias, paneId, size))
+            )
+          ),
+          Effect.asVoid,
+          Effect.catch((error) => report(alias, error))
+        );
+      }),
 
     /**
      * Open a pane beside the one being watched, and watch the host again so it

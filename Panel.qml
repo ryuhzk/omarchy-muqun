@@ -224,6 +224,8 @@ Panel {
 
   /** Set while waiting for a pane whose name we will not know until it exists. */
   property bool adoptNextPane: false
+  /** What the screen is waiting on, while it is empty for a reason worth naming. */
+  property string pendingNote: ""
 
   // A terminal that was not there before, on a named machine or on the one
   // being looked at. It is a tmux window: herdr's terminals belong to the
@@ -239,6 +241,26 @@ Panel {
       rows: root.termRows, columns: root.termColumns,
       command: command || ""
     })
+  }
+
+  // An agent that was not there before, on a herdr host. The place for it and
+  // the agent itself are made on the far side; the pane is adopted when its
+  // first screen arrives, the same way a new terminal is.
+  function newAgent(alias, kind, where) {
+    if (alias === "") return
+    root.setupOpen = false
+    root.adoptNextPane = true
+    root.screenRows = []
+    root.pendingNote = "Starting " + kind + " on " + alias + "."
+    var command = {
+      type: "newAgent", alias: alias, kind: kind, where: where,
+      rows: root.termRows, columns: root.termColumns
+    }
+    if (root.selectedAlias === alias && root.selectedPaneRecord
+        && root.selectedPaneRecord.source === "herdr") {
+      command.besidePane = root.selectedPane
+    }
+    send(command)
   }
 
   function sendText(text) {
@@ -352,6 +374,7 @@ Panel {
             && event.paneId === root.selectedPane
           if (!mine && !root.adoptNextPane) return
           root.adoptNextPane = false
+          root.pendingNote = ""
           root.applyScreen(event)
           if (!mine) {
             root.selectedAlias = event.alias
@@ -389,7 +412,10 @@ Panel {
           root.simfarmFramePath = ""
           return
         }
-        if (event.type === "error") root.lastError = event.message
+        if (event.type === "error") {
+          root.lastError = event.message
+          root.pendingNote = ""
+        }
       }
     }
     onExited: function(code) {
@@ -941,6 +967,8 @@ Panel {
             }
           }
           onTerminalRequested: function(alias) { root.newTerminal(alias, "") }
+          selectedSource: root.selectedPaneRecord ? root.selectedPaneRecord.source : ""
+          onAgentRequested: function(alias, kind, where) { root.newAgent(alias, kind, where) }
         }
 
         Frame {
@@ -1016,6 +1044,7 @@ Panel {
               fontFamily: root.mono
               fontSize: Style.font.bodySmall
               connected: root.selectedPane !== ""
+              pending: root.pendingNote
               onTextEntered: function(text) { root.sendText(text) }
               onKeyEntered: function(key) { root.sendKey(key) }
               onLinkActivated: function(url) { root.openLink(url) }

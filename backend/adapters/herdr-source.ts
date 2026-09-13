@@ -24,6 +24,7 @@ import {
   type TerminalSourceApi,
   type AttachOptions,
   type CommandResult,
+  type NewAgentRequest,
   type TerminalSize,
 } from '../application/ports';
 import { AgentStatus, parseAgentStatus } from '../domain/agent-status';
@@ -36,6 +37,15 @@ import { isAgentPane, type Pane } from '../domain/pane';
  * allowed through and ignored, so a newer herdr does not fail to decode merely
  * for knowing more than we do.
  */
+/**
+ * How long `agent start` may take to report the agent ready.
+ *
+ * An agent's first start on a machine downloads and indexes things, and a
+ * minute is what that has been seen to take. The command comes back early
+ * when the agent stops to ask something, so this is a ceiling, not a wait.
+ */
+const AGENT_START_TIMEOUT_MS = 60_000;
+
 const HerdrPane = Schema.Struct({
   pane_id: Schema.String,
   tab_id: Schema.String,
@@ -195,6 +205,66 @@ function shellSingleQuote(value: string): string {
   return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
+/**
+ * What herdr calls an agent kind: a word. The kind goes on a command line as
+ * an option's value, and a "kind" beginning with a dash would be read as the
+ * next option rather than as a value.
+ */
+const AGENT_KIND = /^[a-z][a-z0-9-]{0,31}$/;
+
+/** The workspace a pane id is qualified by: `w1:p5` lives in `w1`. */
+function workspaceOf(paneId: string): string | null {
+  const match = /^(w[0-9]+):/.exec(paneId);
+  return match?.[1] ?? null;
+}
+
+/**
+ * A name for an agent this plugin started.
+ *
+ * herdr wants a name that is unique among live agents and looks like a word;
+ * a few random characters after the plugin's own name is both, and says
+ * where the agent came from when it turns up in herdr's own lists.
+ */
+function agentName(): string {
+  const tail = Math.floor(Math.random() * 36 ** 4).toString(36).padStart(4, '0');
+  return `muqun-${tail}`;
+}
+
+/** The pane id at a path inside a JSON answer, or nothing. */
+function paneIdIn(raw: string, ...path: ReadonlyArray<string>): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  let node: unknown = parsed;
+  for (const key of ['result', ...path]) {
+    if (node === null || typeof node !== 'object') return null;
+    node = (node as Record<string, unknown>)[key];
+  }
+  return typeof node === 'string' && node !== '' ? node : null;
+}
+
+/** herdr's own words for what went wrong, when it answered with JSON. */
+function complaintIn(result: CommandResult): string {
+  for (const text of [result.stderr, result.stdout]) {
+    try {
+      const parsed = JSON.parse(text.trim()) as { error?: { message?: string; code?: string } };
+      const message = parsed.error?.message ?? parsed.error?.code;
+      if (typeof message === 'string' && message !== '') return message;
+    } catch {
+      // Not JSON. The plain first line is used instead.
+    }
+  }
+  return result.firstError;
+}
+
+/** Whether a failed `agent start` still left an agent in the pane. */
+function startedButBlocked(result: CommandResult): boolean {
+  return /agent_not_ready/.test(result.stderr) || /agent_not_ready/.test(result.stdout);
+}
+
 /** Build the herdr source. The composition root decides where it is offered. */
 export const makeHerdrSource = Effect.gen(function* () {
   const runner = yield* CommandRunner;
@@ -306,6 +376,98 @@ export const makeHerdrSource = Effect.gen(function* () {
     closePane: Effect.fnUntraced(function* (alias: string, paneId: string) {
       const result = yield* runner.run(alias, ['herdr', 'pane', 'close', paneId]);
       yield* demand(alias, 'pane close', result);
+    }),
+
+    /**
+     * A place, then an agent in it.
+     *
+     * Three commands at most: one to make the place -- a split beside the
+     * pane being looked at, a tab in its workspace, or a workspace of its own
+     * -- and one to start the agent in the pane that came back. herdr answers
+     * each with JSON that names what it made, and the pane id is read from
+     * that rather than predicted. Nothing takes focus on the far side: the
+     * person there is doing something, and the one here will see the pane
+     * the moment it is attached.
+     *
+     * `agent start` returns once the agent is ready for input, or at once
+     * with `agent_not_ready` when the agent stopped to ask something on the
+     * way up. Either way there is an agent in the pane, which is what was
+     * asked for.
+     */
+    newAgent: Effect.fnUntraced(function* (alias: string, request: NewAgentRequest) {
+      if (!AGENT_KIND.test(request.kind)) {
+        return yield* new SourceError({
+          alias,
+          command: 'agent start',
+          message: `"${request.kind}" is not the name of an agent kind`,
+        });
+      }
+
+      const beside = request.besidePane ?? '';
+      const workspace = beside === '' ? null : workspaceOf(beside);
+
+      const place: { argv: ReadonlyArray<string>; command: string; path: ReadonlyArray<string> } =
+        request.where === 'split' && beside !== ''
+          ? {
+              argv: ['herdr', 'pane', 'split', beside, '--direction', 'right', '--no-focus'],
+              command: 'pane split',
+              path: ['pane', 'pane_id'],
+            }
+          : request.where === 'workspace'
+            ? {
+                argv: ['herdr', 'workspace', 'create', '--no-focus'],
+                command: 'workspace create',
+                path: ['root_pane', 'pane_id'],
+              }
+            : {
+                argv: [
+                  'herdr',
+                  'tab',
+                  'create',
+                  ...(workspace === null ? [] : ['--workspace', workspace]),
+                  '--no-focus',
+                ],
+                command: 'tab create',
+                path: ['root_pane', 'pane_id'],
+              };
+
+      const made = yield* runner.run(alias, place.argv);
+      if (!made.ok) {
+        return yield* new SourceError({
+          alias,
+          command: place.command,
+          message: complaintIn(made) || `herdr ${place.command} exited ${made.code}`,
+        });
+      }
+      const paneId = paneIdIn(made.stdout, ...place.path);
+      if (paneId === null) {
+        return yield* new SourceError({
+          alias,
+          command: place.command,
+          message: 'herdr made something but did not say which pane it is',
+        });
+      }
+
+      const started = yield* runner.run(alias, [
+        'herdr',
+        'agent',
+        'start',
+        agentName(),
+        '--kind',
+        request.kind,
+        '--pane',
+        paneId,
+        '--timeout',
+        String(AGENT_START_TIMEOUT_MS),
+      ]);
+      if (!started.ok && !startedButBlocked(started)) {
+        return yield* new SourceError({
+          alias,
+          command: 'agent start',
+          message: complaintIn(started) || `herdr agent start exited ${started.code}`,
+        });
+      }
+      return paneId;
     }),
 
     waitForAgents: Effect.fnUntraced(function* (

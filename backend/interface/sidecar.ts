@@ -112,6 +112,18 @@ export const Command = Schema.Union([
     /** Run this in it once it exists. The panel offers this for one thing. */
     command: Schema.optional(Schema.String),
   }),
+  // An agent that was not there before, on a herdr host: a place is made
+  // for it and it is started there. `besidePane` is the pane being looked
+  // at, which is what "beside" and "in this workspace" are measured from.
+  Schema.Struct({
+    type: Schema.Literal('newAgent'),
+    alias: Schema.String,
+    kind: Schema.String,
+    where: Schema.Literals(['split', 'tab', 'workspace']),
+    besidePane: Schema.optional(Schema.String),
+    rows: Schema.optional(Schema.Number),
+    columns: Schema.optional(Schema.Number),
+  }),
   Schema.Struct({ type: Schema.Literal('type'), text: Schema.String }),
   // Pasting is not typing: a program that asked to be told about pastes is
   // told, so a shell can offer to run several lines rather than running them.
@@ -206,6 +218,19 @@ export const runCommand = Effect.fnUntraced(function* (command: Command) {
           columns: command.columns ?? DEFAULT_SIZE.columns,
         },
         command.command
+      );
+    case 'newAgent':
+      return yield* registry.newAgent(
+        command.alias,
+        {
+          kind: command.kind,
+          where: command.where,
+          ...(command.besidePane === undefined ? {} : { besidePane: command.besidePane }),
+        },
+        {
+          rows: command.rows ?? DEFAULT_SIZE.rows,
+          columns: command.columns ?? DEFAULT_SIZE.columns,
+        }
       );
     case 'type':
       return yield* registry.typeText(command.text);

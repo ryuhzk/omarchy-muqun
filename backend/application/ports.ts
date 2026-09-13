@@ -281,7 +281,33 @@ export interface TerminalSourceApi {
      * why it is absent rather than failing.
      */
     newPane?(alias: string): Effect.Effect<string, SourceError | TransportError>;
+    /**
+     * Start an agent where there was none, and say which pane it is in.
+     *
+     * Optional, and the other half of `newPane`: herdr will only hand over a
+     * pane with an agent in it, so on a herdr host the thing that can be made
+     * is not a terminal but an agent, in a place made for it first. tmux has
+     * no agents and does not offer this.
+     */
+    newAgent?(
+      alias: string,
+      request: NewAgentRequest
+    ): Effect.Effect<string, SourceError | TransportError>;
   }
+
+/** What to start, and where to put it. */
+export interface NewAgentRequest {
+  /** herdr's name for the agent kind: `claude`, `codex`, and so on. */
+  readonly kind: string;
+  /**
+   * Beside the pane being looked at, in a new tab of its workspace, or in a
+   * workspace of its own. `split` and `tab` fall back to what they can when
+   * there is no pane to be beside.
+   */
+  readonly where: 'split' | 'tab' | 'workspace';
+  /** The pane the person is looking at, when there is one on this host. */
+  readonly besidePane?: string;
+}
 
 
 export class TerminalSource extends Context.Service<TerminalSource, TerminalSourceApi>()(

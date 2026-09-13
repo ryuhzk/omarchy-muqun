@@ -19,6 +19,8 @@ FocusScope {
   property int fontSize: Style.font.bodySmall
   property string fontFamily: "monospace"
   property bool connected: true
+  /** What the empty screen is waiting on, when it is something worth naming. */
+  property string pending: ""
 
   /** Raw text the person typed, already composed by the input method. */
   signal textEntered(string text)
@@ -122,9 +124,11 @@ FocusScope {
     // It says what it knows. Claiming to be attached when all it knows is that
     // a pane is selected is how an empty screen and a failed one came to look
     // the same.
-    text: !root.connected
-      ? "Pick a pane on the left."
-      : "Opening this pane."
+    text: root.pending !== ""
+      ? root.pending
+      : !root.connected
+        ? "Pick a pane on the left."
+        : "Opening this pane."
     color: Qt.rgba(Color.popups.text.r, Color.popups.text.g, Color.popups.text.b, 0.4)
     font.family: root.fontFamily
     font.pixelSize: Style.font.caption
