@@ -107,7 +107,7 @@ export function panesFromSnapshot(snapshot: HerdrSnapshot): ReadonlyArray<Pane> 
     tabLabels.set(tab.tab_id, label || `tab ${tab.number ?? ''}`.trim());
   }
 
-  return (snapshot.panes ?? []).map((pane) => ({
+  return (snapshot.panes ?? []).filter((pane) => PANE_ID.test(pane.pane_id)).map((pane) => ({
     id: pane.pane_id,
     source: 'herdr' as const,
     title: paneTitle(pane),
@@ -187,7 +187,7 @@ function attachScript(paneId: string, size: TerminalSize, takeover: boolean): st
  * passes that hangup on to the whole group.
  */
 export function watchScript(agents: ReadonlyArray<AgentWatch>): string {
-  const lines = agents.map((agent) => {
+  const lines = agents.filter((agent) => PANE_ID.test(agent.id)).map((agent) => {
     const until = AgentStatus.literals
       .filter((state) => state !== agent.status)
       .map((state) => `--until ${state}`)
@@ -206,6 +206,21 @@ function shellSingleQuote(value: string): string {
 }
 
 /**
+ * What a herdr pane id looks like: `w1:p5`.
+ *
+ * Every pane command takes its target as a bare argument, so a "pane id"
+ * beginning with a dash is not a pane id but an option -- `--takeover` where
+ * a target was expected. Ids come from the machine's own snapshot and come
+ * back from the panel, so nothing this plugin does produces a bad one; but a
+ * snapshot is a document another machine wrote, and this is the boundary at
+ * which its shape is checked rather than trusted. herdr documents its public
+ * ids as a workspace handle, a colon and a pane handle; the handles are
+ * letters and digits (`w1:p5`, and `w1:pA` once a workspace has had more than
+ * nine panes), and nothing else is passed on.
+ */
+const PANE_ID = /^w[0-9A-Za-z]+:p[0-9A-Za-z]+$/;
+
+/**
  * What herdr calls an agent kind: a word. The kind goes on a command line as
  * an option's value, and a "kind" beginning with a dash would be read as the
  * next option rather than as a value.
@@ -214,7 +229,7 @@ const AGENT_KIND = /^[a-z][a-z0-9-]{0,31}$/;
 
 /** The workspace a pane id is qualified by: `w1:p5` lives in `w1`. */
 function workspaceOf(paneId: string): string | null {
-  const match = /^(w[0-9]+):/.exec(paneId);
+  const match = /^(w[0-9A-Za-z]+):/.exec(paneId);
   return match?.[1] ?? null;
 }
 
@@ -243,7 +258,7 @@ function paneIdIn(raw: string, ...path: ReadonlyArray<string>): string | null {
     if (node === null || typeof node !== 'object') return null;
     node = (node as Record<string, unknown>)[key];
   }
-  return typeof node === 'string' && node !== '' ? node : null;
+  return typeof node === 'string' && PANE_ID.test(node) ? node : null;
 }
 
 /** herdr's own words for what went wrong, when it answered with JSON. */
@@ -282,6 +297,18 @@ export const makeHerdrSource = Effect.gen(function* () {
       });
     });
 
+  /** The id, or a refusal that says which command would have run. */
+  const demandPane = (alias: string, command: string, paneId: string) =>
+    PANE_ID.test(paneId)
+      ? Effect.succeed(paneId)
+      : Effect.fail(
+          new SourceError({
+            alias,
+            command,
+            message: `"${paneId}" is not a herdr pane id`,
+          })
+        );
+
   const source: TerminalSourceApi = {
     kind: 'herdr',
 
@@ -308,6 +335,7 @@ export const makeHerdrSource = Effect.gen(function* () {
     }),
 
     read: Effect.fnUntraced(function* (alias: string, paneId: string, lines: number) {
+      yield* demandPane(alias, 'pane read', paneId);
       // `--source visible` is the screen as it stands rather than the recent
       // scrollback, which is what a preview of a live pane should show.
       const result = yield* runner.run(alias, [
@@ -326,6 +354,7 @@ export const makeHerdrSource = Effect.gen(function* () {
     }),
 
     sendText: Effect.fnUntraced(function* (alias: string, paneId: string, text: string) {
+      yield* demandPane(alias, 'pane send-text', paneId);
       const result = yield* runner.run(alias, ['herdr', 'pane', 'send-text', paneId, text]);
       yield* demand(alias, 'pane send-text', result);
     }),
@@ -335,6 +364,7 @@ export const makeHerdrSource = Effect.gen(function* () {
       paneId: string,
       keys: ReadonlyArray<string>
     ) {
+      yield* demandPane(alias, 'pane send-keys', paneId);
       const result = yield* runner.run(alias, ['herdr', 'pane', 'send-keys', paneId, ...keys]);
       yield* demand(alias, 'pane send-keys', result);
     }),
@@ -345,6 +375,7 @@ export const makeHerdrSource = Effect.gen(function* () {
       size: TerminalSize,
       options?: AttachOptions
     ) {
+      yield* demandPane(alias, 'agent attach', paneId);
       const session = yield* runner.session(
         alias,
         ['sh', '-c', attachScript(paneId, size, options?.takeover === true)],
@@ -362,6 +393,7 @@ export const makeHerdrSource = Effect.gen(function* () {
       paneId: string,
       direction: 'right' | 'down'
     ) {
+      yield* demandPane(alias, 'pane split', paneId);
       const result = yield* runner.run(alias, [
         'herdr',
         'pane',
@@ -374,6 +406,7 @@ export const makeHerdrSource = Effect.gen(function* () {
     }),
 
     closePane: Effect.fnUntraced(function* (alias: string, paneId: string) {
+      yield* demandPane(alias, 'pane close', paneId);
       const result = yield* runner.run(alias, ['herdr', 'pane', 'close', paneId]);
       yield* demand(alias, 'pane close', result);
     }),
@@ -404,6 +437,7 @@ export const makeHerdrSource = Effect.gen(function* () {
       }
 
       const beside = request.besidePane ?? '';
+      if (beside !== '') yield* demandPane(alias, 'pane split', beside);
       const workspace = beside === '' ? null : workspaceOf(beside);
 
       const place: { argv: ReadonlyArray<string>; command: string; path: ReadonlyArray<string> } =
