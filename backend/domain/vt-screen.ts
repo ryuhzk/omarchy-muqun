@@ -25,6 +25,7 @@
  * puts back exactly what was there without anything having to remember it.
  */
 
+import { withPlainLinks } from './links';
 import { DEFAULT_STYLE, cloneStyle, type Row, type Run, type Style } from './screen';
 
 export interface Cell {
@@ -557,7 +558,7 @@ export class VtScreen {
   toRows(historyRows = 0): ReadonlyArray<Row> {
     const wanted = clamp(historyRows, 0, this.history.length);
     const source = [...this.history.slice(this.history.length - wanted), ...this.grid];
-    return source.map((cells) => ({ runs: runsOf(cells) }));
+    return source.map((cells) => ({ runs: runsOf(withPlainLinks(cells)) }));
   }
 
   /** Plain text of the visible screen, for tests and for tooltips. */
@@ -573,14 +574,14 @@ export class VtScreen {
    */
   viewport(): ReadonlyArray<Row> {
     if (this.scrollOffset === 0) {
-      return this.grid.map((cells) => ({ runs: runsOf(cells) }));
+      return this.grid.map((cells) => ({ runs: runsOf(withPlainLinks(cells)) }));
     }
     const start = this.viewportStart();
     const shown: Array<Array<Cell>> = [];
     for (let offset = 0; offset < this.rows; offset += 1) {
       shown.push(this.documentRow(start + offset));
     }
-    return shown.map((cells) => ({ runs: runsOf(cells) }));
+    return shown.map((cells) => ({ runs: runsOf(withPlainLinks(cells)) }));
   }
 
   /**
