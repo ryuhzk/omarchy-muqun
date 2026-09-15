@@ -14,6 +14,7 @@ import { Context, Effect, Schema, Stream, type Scope } from 'effect';
 import type { AgentStatus } from '../domain/agent-status';
 import type { Capability } from '../domain/host';
 import type { Pane } from '../domain/pane';
+import type { RepoContext } from '../domain/repo-context';
 import type { Row } from '../domain/screen';
 import type {
   SimfarmConfig,
@@ -477,6 +478,20 @@ export type SimulatorUpdate =
       /** Bumped per frame, so a viewer can tell the file changed. */
       readonly revision: number;
     };
+
+/**
+ * Where a directory's work lives: its repository, branch and pull request.
+ *
+ * A port because answering means running git, and gh, on the machine the
+ * directory is on. Null is "not a repository", and also "could not ask": the
+ * panel shows nothing either way, and a pane is not worse off for it.
+ */
+export class RepoInspector extends Context.Service<
+  RepoInspector,
+  {
+    inspect(alias: string, cwd: string): Effect.Effect<RepoContext | null, TransportError>;
+  }
+>()('muqun/RepoInspector') {}
 
 export class TerminalFactory extends Context.Service<
   TerminalFactory,

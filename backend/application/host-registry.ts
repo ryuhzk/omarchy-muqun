@@ -9,6 +9,7 @@
 import { Cause, Clock, Context, Effect, Fiber, Layer, Queue, Schedule, Stream } from 'effect';
 import { attentionCount, connectingHost, type Capability, type Host } from '../domain/host';
 import { isAgentPane, type Pane } from '../domain/pane';
+import type { RepoContext } from '../domain/repo-context';
 import { screenDelta, type ChangedRow } from '../domain/screen';
 import { browserUrl, type SimfarmConfig, type SimulatorDevice } from '../domain/simfarm';
 import {
@@ -21,6 +22,7 @@ import {
 import {
   Clipboard,
   CommandRunner,
+  RepoInspector,
   Simulators,
   type AgentWatch,
   type NewAgentRequest,
@@ -48,6 +50,13 @@ export type Change =
       readonly cursor: CursorState;
     }
   | { readonly type: 'error'; readonly alias: string; readonly message: string }
+  | {
+      readonly type: 'context';
+      readonly alias: string;
+      readonly paneId: string;
+      /** Where the pane's work lives, or null when it is not in a repository. */
+      readonly context: RepoContext | null;
+    }
   | {
       readonly type: 'simulators';
       readonly devices: ReadonlyArray<SimulatorDevice>;
@@ -94,6 +103,19 @@ const WATCH_SETTLE_MS = 3_000;
  * keeps answering at once is asked at the idle rate rather than the loop's.
  */
 const WATCH_BACKOFF_MS = 1_000;
+
+/**
+ * How long what was learned about a directory is believed.
+ *
+ * Asking means a round trip and, with gh, a call to GitHub, for a pane that
+ * is being looked at. Five minutes is long enough that switching between two
+ * panes costs nothing, short enough that a request opened while working shows
+ * up before it is merged.
+ */
+const CONTEXT_TTL_MS = 300_000;
+
+/** A gh that is waiting on the network must not hold the pane's opening. */
+const CONTEXT_TIMEOUT_MS = 15_000;
 
 /**
  * The most wheel notches one gesture sends onward.
@@ -144,6 +166,7 @@ const makeRegistry = Effect.gen(function* () {
   const runner = yield* CommandRunner;
   const simulators = yield* Simulators;
   const terminals = yield* TerminalFactory;
+  const inspector = yield* RepoInspector;
   const changes = yield* Queue.unbounded<Change>();
 
   // One mutable map rather than a `SubscriptionRef`, because there is exactly
@@ -245,6 +268,18 @@ const makeRegistry = Effect.gen(function* () {
    * being unhappy should not empty a list the other one filled. Only when
    * nothing answered at all does the host say so.
    */
+  /**
+   * What each source said last time it answered.
+   *
+   * A source that does not answer one round -- a snapshot that timed out, a
+   * tool mid-restart -- used to have its panes dropped from the list, and
+   * with them went the pane being looked at: the next resize could not find
+   * it and reported that its tool was gone. The list is a picture of the
+   * machine, and a picture that failed to update is better shown as it was
+   * than as empty.
+   */
+  const remembered = new Map<string, ReadonlyArray<Pane>>();
+
   const refresh = Effect.fnUntraced(function* (alias: string) {
     const list = sourcesFor(alias);
     if (list.length === 0) return [] as ReadonlyArray<Pane>;
@@ -269,17 +304,31 @@ const makeRegistry = Effect.gen(function* () {
 
     const collected: Array<Pane> = [];
     let failure: string | null = null;
-    for (const answer of answers) {
-      collected.push(...answer.panes);
-      if (answer.failure !== null) failure = answer.failure;
-    }
+    let anyAnswered = false;
+    answers.forEach((answer, index) => {
+      const key = `${alias}\u0000${list[index]?.kind ?? ''}`;
+      if (answer.failure === null) {
+        anyAnswered = true;
+        remembered.set(key, answer.panes);
+        collected.push(...answer.panes);
+      } else {
+        failure = answer.failure;
+        collected.push(...(remembered.get(key) ?? []));
+      }
+    });
 
-    if (collected.length === 0 && failure !== null) {
+    if (!anyAnswered && failure !== null && collected.length === 0) {
       yield* patch(alias, { panes: [], state: 'error', error: failure });
       return [] as ReadonlyArray<Pane>;
     }
 
-    yield* patch(alias, { panes: collected, state: 'ready', error: undefined });
+    // Ready, with the complaint alongside when one tool did not answer: the
+    // list stands, and the host says what it could not refresh.
+    yield* patch(alias, {
+      panes: collected,
+      state: 'ready',
+      ...(failure === null ? { error: undefined } : { error: failure }),
+    });
     return collected;
   });
 
@@ -333,6 +382,12 @@ const makeRegistry = Effect.gen(function* () {
           )
         )
       );
+
+      // The pane being looked at, if it is on this host, is asked again about
+      // its work when what is known has aged out. Cheap when it has not.
+      if (attached !== null && attached.alias === alias) {
+        yield* Effect.forkScoped(describeContext(alias, attached.paneId));
+      }
 
       // One watch per source that has agents. A source with none sits out
       // rather than holding a connection open to say nothing.
@@ -523,6 +578,8 @@ const makeRegistry = Effect.gen(function* () {
   let attached: {
     alias: string;
     paneId: string;
+    /** The tool that opened it, so it can be reopened without the list. */
+    source: TerminalSourceApi;
     terminal: Terminal;
     write(data: string): Effect.Effect<void>;
     /** One key per row as last sent, or nothing when the panel has seen none. */
@@ -595,6 +652,38 @@ const makeRegistry = Effect.gen(function* () {
     }).pipe(Effect.asVoid);
   });
 
+  /** What was learned about a directory, and when. */
+  const contexts = new Map<string, { at: number; context: RepoContext | null }>();
+
+  /**
+   * Tell the panel where the attached pane's work lives.
+   *
+   * Asked of the machine only for the pane being looked at, and only when
+   * what is known is older than the ceiling: the list is never swept for
+   * this, because a call to GitHub per pane per refresh is the shape of the
+   * loop this file once ran against herdr.
+   */
+  const describeContext = Effect.fnUntraced(function* (alias: string, paneId: string) {
+    const cwd = hosts.get(alias)?.panes.find((pane) => pane.id === paneId)?.cwd ?? '';
+    const key = `${alias}\u0000${cwd}`;
+    const now = yield* Clock.currentTimeMillis;
+    const known = contexts.get(key);
+    let context: RepoContext | null;
+    if (known !== undefined && now - known.at < CONTEXT_TTL_MS) {
+      context = known.context;
+    } else {
+      context = yield* inspector.inspect(alias, cwd).pipe(
+        Effect.timeout(CONTEXT_TIMEOUT_MS),
+        Effect.catch(() => Effect.succeed(null))
+      );
+      contexts.set(key, { at: now, context });
+    }
+    // Only if this is still the pane being looked at. The answer to a
+    // question about a pane somebody has moved on from is not news.
+    if (attached === null || attached.alias !== alias || attached.paneId !== paneId) return;
+    yield* Queue.offer(changes, { type: 'context' as const, alias, paneId, context });
+  });
+
   /**
    * Attach to a pane, taking the terminal if something else holds it.
    *
@@ -614,12 +703,22 @@ const makeRegistry = Effect.gen(function* () {
      * back means the text stays put while the pty is reopened behind it,
      * instead of the window blanking every time a panel slides in beside it.
      */
-    keepScreen = false
+    keepScreen = false,
+    /**
+     * The tool that owns the pane, when the caller already knows.
+     *
+     * The list is a snapshot and the pane is real. A pane made a moment ago
+     * is not in the snapshot yet, and one being looked at does not stop
+     * existing because one refresh did not mention it; in both cases the tool
+     * is known without the list -- the one that just made the pane, or the
+     * one that opened it last time -- and asking the list instead was how a
+     * new agent, or a resize, came to report that its tool had gone.
+     */
+    via: TerminalSourceApi | null = null
   ) {
-    const carried =
-      keepScreen && attached !== null && attached.alias === alias && attached.paneId === paneId
-        ? attached.terminal
-        : null;
+    const same = attached !== null && attached.alias === alias && attached.paneId === paneId;
+    const carried = keepScreen && same && attached !== null ? attached.terminal : null;
+    const known = via ?? (same && attached !== null ? attached.source : null);
 
     if (attachedFiber !== null) {
       yield* Fiber.interrupt(attachedFiber);
@@ -633,7 +732,7 @@ const makeRegistry = Effect.gen(function* () {
     attachedFiber = yield* Effect.forkScoped(
       Effect.scoped(
         Effect.gen(function* () {
-          const source = sourceForPane(alias, paneId);
+          const source = known ?? sourceForPane(alias, paneId);
           if (source === null) {
             if (opening?.token === attempt) opening = null;
             queued = '';
@@ -648,7 +747,19 @@ const makeRegistry = Effect.gen(function* () {
           const terminal = carried ?? terminals.create(size);
           if (carried !== null) carried.resize(size);
           const pane = yield* source.attach(alias, paneId, size, { takeover: true });
-          attached = { alias, paneId, terminal, write: pane.write, sent: null, sentCursor: '' };
+          attached = {
+            alias,
+            paneId,
+            source,
+            terminal,
+            write: pane.write,
+            sent: null,
+            sentCursor: '',
+          };
+
+          // And, alongside, where its work lives. Forked so a slow gh does not
+          // hold the screen; scoped so leaving the pane drops the question.
+          yield* Effect.forkScoped(describeContext(alias, paneId));
 
           // Whatever was typed while this was opening, now that there is
           // somewhere to put it.
@@ -815,7 +926,9 @@ const makeRegistry = Effect.gen(function* () {
         return make.call(source, alias).pipe(
           Effect.andThen((paneId) =>
             refresh(alias).pipe(
-              Effect.andThen(paneId === '' ? Effect.void : attachPane(alias, paneId, size)),
+              Effect.andThen(
+                paneId === '' ? Effect.void : attachPane(alias, paneId, size, false, source)
+              ),
               // Typed into the pane rather than into the terminal this end just
               // attached to. The pane exists the moment it is made and holds
               // what is sent to it; the attachment is still opening, and a
@@ -854,7 +967,9 @@ const makeRegistry = Effect.gen(function* () {
         return make.call(source, alias, request).pipe(
           Effect.andThen((paneId) =>
             refresh(alias).pipe(
-              Effect.andThen(paneId === '' ? Effect.void : attachPane(alias, paneId, size))
+              Effect.andThen(
+                paneId === '' ? Effect.void : attachPane(alias, paneId, size, false, source)
+              )
             )
           ),
           Effect.asVoid,
@@ -1070,8 +1185,8 @@ const makeRegistry = Effect.gen(function* () {
         // when it is opened. Re-attaching is cheap on a connection that is
         // already up, and the alternative is a terminal drawing for a window
         // that is no longer that shape.
-        const { alias, paneId } = attached;
-        return attachPane(alias, paneId, size, true);
+        const { alias, paneId, source } = attached;
+        return attachPane(alias, paneId, size, true, source);
       }),
   } as const;
 });

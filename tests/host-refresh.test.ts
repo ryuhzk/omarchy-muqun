@@ -14,6 +14,7 @@ import { HostRegistry } from '../backend/application/host-registry';
 import {
   Clipboard,
   CommandRunner,
+  RepoInspector,
   Simulators,
   TerminalFactory,
   TerminalSources,
@@ -74,6 +75,7 @@ function registryWith(sources: ReadonlyArray<TerminalSourceApi>) {
       forward: () => unused,
       upload: () => unused,
     }),
+    Layer.succeed(RepoInspector, { inspect: () => Effect.succeed(null) }),
     Layer.succeed(Simulators, {
       open: () => Effect.void,
       status: () => Effect.succeed(null),

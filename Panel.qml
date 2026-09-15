@@ -213,6 +213,8 @@ Panel {
   function attachPane(alias, paneId) {
     root.selectedAlias = alias
     root.selectedPane = paneId
+    root.lastError = ""
+    root.repoContext = null
     root.screenRows = []
     root.sentRows = root.termRows
     root.sentColumns = root.termColumns
@@ -226,6 +228,8 @@ Panel {
   property bool adoptNextPane: false
   /** What the screen is waiting on, while it is empty for a reason worth naming. */
   property string pendingNote: ""
+  /** Where the attached pane's work lives, from the sidecar. Null until it says. */
+  property var repoContext: null
 
   // A terminal that was not there before, on a named machine or on the one
   // being looked at. It is a tmux window: herdr's terminals belong to the
@@ -375,8 +379,13 @@ Panel {
           if (!mine && !root.adoptNextPane) return
           root.adoptNextPane = false
           root.pendingNote = ""
+          // A screen arriving is the pane opening; whatever went wrong before
+          // is over, and a message about it left standing would be about a
+          // pane that is plainly working.
+          if (event.full) root.lastError = ""
           root.applyScreen(event)
           if (!mine) {
+            root.repoContext = null
             root.selectedAlias = event.alias
             root.selectedPane = event.paneId
             // A terminal somebody just asked for is the one they want to type
@@ -386,6 +395,11 @@ Panel {
             // selected. So it is handed over here, once there is.
             Qt.callLater(function() { surface.focusInput() })
           }
+          return
+        }
+        if (event.type === "context") {
+          if (event.alias !== root.selectedAlias || event.paneId !== root.selectedPane) return
+          root.repoContext = event.context
           return
         }
         if (event.type === "simulators") {
@@ -795,30 +809,61 @@ Panel {
           }
         }
 
-        Text {
-          id: paneTitle
-          textFormat: Text.PlainText
+        // The pane's name, and beside it where its work lives. The name takes
+        // what it needs and the chips take what is left, up to the machine's
+        // own facts on the right; a long name gives way before the chips do,
+        // because a name that is elided is still recognisable and a chip that
+        // is elided is not a link anyone can read.
+        Item {
+          id: titleRow
           anchors.left: parent.left
           anchors.leftMargin: Style.space(16) + hostName.width + Style.space(16)
-          anchors.right: simfarmToggle.left
-          anchors.rightMargin: Style.space(12)
-          anchors.baseline: hostName.baseline
-          text: root.showSetup
-            ? ""
-            : root.selectedPaneRecord
-              ? root.selectedPaneRecord.title
-              : "Nothing selected"
-          color: Color.popups.text
-          font.family: root.mono
-          font.pixelSize: Style.font.subtitle
-          elide: Text.ElideRight
+          anchors.right: hostNote.visible ? hostNote.left : simfarmToggle.left
+          anchors.rightMargin: Style.space(16)
+          anchors.top: parent.top
+          anchors.bottom: parent.bottom
 
-          // A new name settles in rather than replacing the old one in place.
-          onTextChanged: titleIn.restart()
-          NumberAnimation {
-            id: titleIn
-            target: paneTitle; property: "opacity"; from: 0.3; to: 1
-            duration: 200; easing.type: Easing.OutCubic
+          readonly property real chipsWidth: contextStrip.visible
+            ? contextStrip.implicitWidth + Style.space(14) : 0
+
+          Text {
+            id: paneTitle
+            textFormat: Text.PlainText
+            anchors.left: parent.left
+            // On the host name's baseline. It is not a sibling any more, so
+            // the line is computed rather than anchored: this row starts at
+            // the header's top, so the header's coordinates are this row's.
+            y: hostName.y + hostName.baselineOffset - baselineOffset
+            width: Math.max(Style.space(60),
+                            Math.min(implicitWidth, titleRow.width - titleRow.chipsWidth))
+            text: root.showSetup
+              ? ""
+              : root.selectedPaneRecord
+                ? root.selectedPaneRecord.title
+                : "Nothing selected"
+            color: Color.popups.text
+            font.family: root.mono
+            font.pixelSize: Style.font.subtitle
+            elide: Text.ElideRight
+
+            // A new name settles in rather than replacing the old one in place.
+            onTextChanged: titleIn.restart()
+            NumberAnimation {
+              id: titleIn
+              target: paneTitle; property: "opacity"; from: 0.3; to: 1
+              duration: 200; easing.type: Easing.OutCubic
+            }
+          }
+
+          ContextStrip {
+            id: contextStrip
+            anchors.left: paneTitle.right
+            anchors.leftMargin: Style.space(14)
+            anchors.verticalCenter: parent.verticalCenter
+            height: parent.height
+            fontFamily: root.mono
+            context: root.showSetup ? null : root.repoContext
+            onOpened: function(url) { root.openLink(url) }
           }
         }
 
@@ -826,6 +871,7 @@ Panel {
         // with spaces between them: they are facts about the machine, not
         // controls, and a string joined with punctuation is chrome.
         Text {
+          id: hostNote
           textFormat: Text.PlainText
           anchors.right: simfarmToggle.left
           anchors.rightMargin: Style.space(16)
@@ -1089,6 +1135,9 @@ Panel {
             Behavior on height { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
             Behavior on opacity { NumberAnimation { duration: 160 } }
             text: root.lastError
+            // Read it, click it, it goes.
+            HoverHandler { cursorShape: Qt.PointingHandCursor }
+            TapHandler { onTapped: root.lastError = "" }
             color: Color.urgent
             font.family: root.mono
             font.pixelSize: Style.font.caption

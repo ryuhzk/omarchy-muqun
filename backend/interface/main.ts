@@ -15,6 +15,7 @@
 import { BunRuntime, BunServices } from '@effect/platform-bun';
 import { Effect, Layer, Stream } from 'effect';
 import { ClipboardLayer } from '../adapters/clipboard';
+import { GitContextLayer } from '../adapters/git-context';
 import { makeHerdrSource } from '../adapters/herdr-source';
 import { SimfarmLayer } from '../adapters/simfarm-source';
 import { reapOwnChildren, SshRunnerLayer } from '../adapters/ssh-runner';
@@ -44,6 +45,7 @@ const Infrastructure = Layer.mergeAll(
   VtTerminalFactoryLayer,
   SourcesLayer,
   SimfarmLayer.pipe(Layer.provide(SshRunnerLayer)),
+  GitContextLayer.pipe(Layer.provide(SshRunnerLayer)),
   ClipboardLayer,
   SshRunnerLayer
 ).pipe(Layer.provide(BunServices.layer));
