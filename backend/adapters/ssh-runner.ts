@@ -12,6 +12,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { connect } from 'node:net';
 import { runtimeDirectory } from './runtime-dir';
+import { resolveSystemExecutable, sidecarEnvironment } from './trusted-executable';
 import { ChildProcess, ChildProcessSpawner } from 'effect/unstable/process';
 import {
   CommandResult,
@@ -50,6 +51,9 @@ const CONTROL_PERSIST_SECONDS = 120;
  */
 const FORWARD_READY_TIMEOUT_MS = 5_000;
 const FORWARD_POLL_MS = 50;
+
+const SSH = resolveSystemExecutable('ssh');
+const PGREP = resolveSystemExecutable('pgrep');
 
 /**
  * How much of a one-shot command's output is read.
@@ -150,36 +154,15 @@ function sshCommand(
   // remote command is handed a pipe and every program that asks whether it is
   // talking to a terminal answers no.
   const terminal = options?.pty === true ? ['-tt'] : [];
-  const command = ChildProcess.make('ssh', [
-    ...terminal,
-    ...sharedOptions(),
-    alias,
-    '--',
-    ...argv.map(remoteQuote),
-  ]);
-  if (options?.pty !== true) return command;
+  const env = options?.pty === true
+    ? sidecarEnvironment({ TERM: 'xterm-256color' })
+    : sidecarEnvironment();
 
-  // What kind of terminal the far side is talking to.
-  //
-  // ssh copies this end's `TERM` into the pty it asks for, and this end is a
-  // desktop shell started by the session rather than from a terminal, so there
-  // was nothing to copy. A pty whose `TERM` is empty is not a terminal any
-  // program will draw on: tmux refuses outright with "terminal does not support
-  // clear", which is why panes on a machine that answered perfectly well would
-  // not open. It is set here rather than in each script because it is a fact
-  // about the thing at this end -- the panel's own terminal, which understands
-  // what a modern xterm understands.
-  //
-  // Everything this process already has goes with it. Setting an environment
-  // replaces the inherited one rather than adding to it, and ssh without `PATH`
-  // or the agent socket is ssh that cannot connect.
-  const inherited: Record<string, string> = {};
-  for (const [name, value] of Object.entries(process.env)) {
-    if (value !== undefined) inherited[name] = value;
-  }
-  inherited.TERM = 'xterm-256color';
-
-  return ChildProcess.setEnv(command, inherited) as ChildProcess.StandardCommand;
+  return ChildProcess.make(
+    SSH,
+    [...terminal, ...sharedOptions(), alias, '--', ...argv.map(remoteQuote)],
+    { env }
+  );
 }
 
 /**
@@ -221,18 +204,22 @@ function safeName(name: string): string {
  * exists only to carry the port.
  */
 function forwardCommand(alias: string, forward: PortForward): ChildProcess.StandardCommand {
-  return ChildProcess.make('ssh', [
-    ...sharedOptions(),
-    '-N',
-    // Fail loudly when the local port is taken. Without this ssh stays up
-    // having forwarded nothing, and everything downstream reads as a machine
-    // that will not answer.
-    '-o',
-    'ExitOnForwardFailure=yes',
-    '-L',
-    `${forward.localPort}:${forward.remoteHost}:${forward.remotePort}`,
-    alias,
-  ]);
+  return ChildProcess.make(
+    SSH,
+    [
+      ...sharedOptions(),
+      '-N',
+      // Fail loudly when the local port is taken. Without this ssh stays up
+      // having forwarded nothing, and everything downstream reads as a machine
+      // that will not answer.
+      '-o',
+      'ExitOnForwardFailure=yes',
+      '-L',
+      `${forward.localPort}:${forward.remoteHost}:${forward.remotePort}`,
+      alias,
+    ],
+    { env: sidecarEnvironment() }
+  );
 }
 
 /**
@@ -259,9 +246,9 @@ export function reapStrays(): void {
   const self = process.pid;
   try {
     const listed = spawnSync(
-      'pgrep',
+      PGREP,
       ['-u', String(process.getuid?.() ?? 0), '-f', OWNER_TAG],
-      { encoding: 'utf8' }
+      { encoding: 'utf8', env: sidecarEnvironment() }
     );
     if (listed.status !== 0 || typeof listed.stdout !== 'string') return;
 
@@ -345,9 +332,9 @@ export function reapOwnChildren(): void {
   const self = process.pid;
   try {
     const listed = spawnSync(
-      'pgrep',
+      PGREP,
       ['-u', String(process.getuid?.() ?? 0), '-f', OWNER_TAG],
-      { encoding: 'utf8' }
+      { encoding: 'utf8', env: sidecarEnvironment() }
     );
     if (listed.status !== 0 || typeof listed.stdout !== 'string') return;
 

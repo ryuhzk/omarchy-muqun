@@ -131,6 +131,34 @@ Panel {
   readonly property string pluginDir: decodeURIComponent(
     String(Qt.resolvedUrl(".")).replace(/^file:\/\//, "").replace(/\/$/, ""))
 
+  readonly property string sidecarLauncherPath: pluginDir + "/scripts/run-sidecar.sh"
+  readonly property string wlCopyPath: "/usr/bin/wl-copy"
+  readonly property string xdgOpenPath: "/usr/bin/xdg-open"
+
+  /** The smallest environment the sidecar needs for ssh and Wayland. */
+  readonly property var sidecarEnvironment: ({
+    HOME: Quickshell.env("HOME"),
+    USER: Quickshell.env("USER"),
+    LOGNAME: Quickshell.env("LOGNAME"),
+    SSH_AUTH_SOCK: Quickshell.env("SSH_AUTH_SOCK"),
+    XDG_RUNTIME_DIR: Quickshell.env("XDG_RUNTIME_DIR"),
+    WAYLAND_DISPLAY: Quickshell.env("WAYLAND_DISPLAY"),
+    DISPLAY: Quickshell.env("DISPLAY"),
+    LANG: Quickshell.env("LC_ALL") || Quickshell.env("LANG") || "C.UTF-8"
+  })
+
+  readonly property var clipboardEnvironment: ({
+    WAYLAND_DISPLAY: Quickshell.env("WAYLAND_DISPLAY"),
+    XDG_RUNTIME_DIR: Quickshell.env("XDG_RUNTIME_DIR")
+  })
+
+  readonly property var desktopOpenEnvironment: ({
+    HOME: Quickshell.env("HOME"),
+    XDG_RUNTIME_DIR: Quickshell.env("XDG_RUNTIME_DIR"),
+    WAYLAND_DISPLAY: Quickshell.env("WAYLAND_DISPLAY"),
+    DISPLAY: Quickshell.env("DISPLAY")
+  })
+
   // The font Omarchy is configured with, not a list of guesses. The material
   // here is terminal output, and a window on the same character grid as the
   // thing it shows reads as part of it rather than as a viewer wrapped around
@@ -330,7 +358,9 @@ Panel {
     // dropped in silence: the panel looks attached, the sidecar was never asked
     // for anything, and nothing anywhere says so.
     stdinEnabled: true
-    command: ["bun", "run", root.pluginDir + "/backend/interface/main.ts"]
+    clearEnvironment: true
+    environment: root.sidecarEnvironment
+    command: ["/bin/sh", root.sidecarLauncherPath]
     // Whatever the sidecar says that is not a protocol line. Without this it
     // goes nowhere: a command it could not read, a layer that failed to build,
     // a crash on the way up, all silent, with the panel waiting on a reply that
@@ -1215,7 +1245,9 @@ Panel {
 
   Process {
     id: clipboardProcess
-    command: ["wl-copy"]
+    command: [root.wlCopyPath]
+    clearEnvironment: true
+    environment: root.clipboardEnvironment
     // Written to rather than quoted into a command line. Terminal output can
     // contain anything at all, and the one way to hand it over that cannot be
     // read as syntax is a pipe.
@@ -1261,7 +1293,11 @@ Panel {
   // the window, and a child would be taken down with it.
   function openLink(url) {
     if (!openable(url)) return
-    Quickshell.execDetached(["xdg-open", url])
+    Quickshell.execDetached({
+      command: [root.xdgOpenPath, url],
+      clearEnvironment: true,
+      environment: root.desktopOpenEnvironment
+    })
   }
 
   // The shell's own configuration, in whichever editor Omarchy is set to use.

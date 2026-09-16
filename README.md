@@ -148,9 +148,12 @@ bar's number changes when the agent does.
 
 ## Develop
 
+Clone the repository, then run the repository check script. It installs
+dependencies if needed, runs the test suite, and builds the sidecar entry
+point. The plugin itself never invokes a package manager at runtime.
+
 ```bash
-bun install
-bun test
+bun run check
 ```
 
 Live checks against a real machine live in `scripts/` and are not part of the

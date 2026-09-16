@@ -14,6 +14,7 @@
 import { Effect, Layer, Stream } from 'effect';
 import { ChildProcess, ChildProcessSpawner } from 'effect/unstable/process';
 import { Clipboard, type ClipboardContent } from '../application/ports';
+import { clipboardEnvironment, resolveSystemExecutable } from './trusted-executable';
 
 /**
  * The picture formats worth taking, in the order they are preferred.
@@ -59,6 +60,55 @@ const LIMIT_BYTES = 16 * 1024 * 1024;
 /** How long to wait for the clipboard to answer at all. */
 const TIMEOUT_MS = 4_000;
 
+const WL_PASTE = resolveSystemExecutable('wl-paste');
+
+/**
+ * Read stdout in bounded chunks.
+ *
+ * The limit is enforced while bytes arrive, not after they have all been kept
+ * in memory, so a hostile clipboard producer cannot make this process grow
+ * without bound before the refusal happens.
+ */
+export function collectBoundedBytes(
+  stdout: Stream.Stream<Uint8Array>,
+  limit: number
+): Effect.Effect<
+  Uint8Array | null,
+  never,
+  ChildProcessSpawner.ChildProcessSpawner | import('effect/Scope').Scope
+> {
+  return Effect.gen(function* () {
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    let exceeded = false;
+
+    yield* stdout.pipe(
+      Stream.runForEach((chunk) =>
+        Effect.sync(() => {
+          if (exceeded) return;
+          total += chunk.byteLength;
+          if (total > limit) {
+            exceeded = true;
+            return;
+          }
+          chunks.push(chunk);
+        })
+      ),
+      Effect.catchCause(() => Effect.void)
+    );
+
+    if (total === 0 || exceeded) return null;
+
+    const bytes = new Uint8Array(total);
+    let at = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, at);
+      at += chunk.byteLength;
+    }
+    return bytes;
+  });
+}
+
 export const ClipboardLayer = Layer.effect(
   Clipboard,
   Effect.gen(function* () {
@@ -66,7 +116,9 @@ export const ClipboardLayer = Layer.effect(
 
     /** Run `wl-paste` and collect what it wrote, or nothing. */
     const paste = Effect.fnUntraced(function* (argv: ReadonlyArray<string>) {
-      const handle = yield* spawner.spawn(ChildProcess.make('wl-paste', [...argv]));
+      const handle = yield* spawner.spawn(
+        ChildProcess.make(WL_PASTE, [...argv], { env: clipboardEnvironment() })
+      );
 
       // stderr is drained rather than read: wl-paste complains about an empty
       // clipboard there, and an unread pipe that fills would wedge the read.
@@ -74,19 +126,13 @@ export const ClipboardLayer = Layer.effect(
         handle.stderr.pipe(Stream.runDrain, Effect.catchCause(() => Effect.void))
       );
 
-      const chunks = yield* handle.stdout.pipe(Stream.runCollect);
-
-      let total = 0;
-      for (const chunk of chunks) total += chunk.byteLength;
-      if (total === 0 || total > LIMIT_BYTES) return null;
-
-      const bytes = new Uint8Array(total);
-      let at = 0;
-      for (const chunk of chunks) {
-        bytes.set(chunk, at);
-        at += chunk.byteLength;
+      const collected = yield* collectBoundedBytes(handle.stdout, LIMIT_BYTES);
+      if (collected === null) {
+        yield* handle.kill({ killSignal: 'SIGTERM' }).pipe(Effect.catchCause(() => Effect.void));
+        yield* handle.exitCode.pipe(Effect.catchCause(() => Effect.void));
+        return null;
       }
-      return bytes;
+      return collected;
     });
 
     const safely = <A>(work: Effect.Effect<A, unknown, never>, fallback: A) =>
