@@ -182,17 +182,29 @@ FocusScope {
     }
   }
 
-  // A field with no size and no visible text. It exists so an input method has
+  // An invisible field with no text of its own. It exists so an input method has
   // somewhere to compose: typing Chinese means a candidate window and a commit,
   // and neither happens to a plain key handler. What it commits is forwarded
   // and cleared at once, so it never accumulates a line of its own.
+  //
+  // It sits on the terminal's cursor cell, one cell tall. The input method
+  // places its candidate window at the focused field's cursor rectangle, so a
+  // field left at the corner put the candidates at the top of the window
+  // instead of beside what is being typed.
   TextInput {
     id: capture
-    width: 0
-    height: 0
+    x: view.x + root.cursor.column * view.cellWidth
+    y: view.y + root.cursor.row * view.cellHeight
+    width: 1
+    height: view.cellHeight
     opacity: 0
     enabled: root.connected
     focus: true
+
+    // Moving the field is not an edit, so Qt does not re-send the cursor
+    // rectangle on its own; ask for it, or the candidates stay where typing began.
+    onXChanged: if (activeFocus) Qt.inputMethod.update(Qt.ImCursorRectangle)
+    onYChanged: if (activeFocus) Qt.inputMethod.update(Qt.ImCursorRectangle)
 
     onTextChanged: {
       if (text === "") return
